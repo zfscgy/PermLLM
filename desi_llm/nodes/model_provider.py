@@ -63,18 +63,18 @@ class ModelProvider:
         for i in range(ChatGML6B.max_token_id):
             random_share_server[i] = random_vec_with_seed(permutation[i], GLM6BConfig.model_dim, [-1, 1])
         random_share_obfuscator = rotated_embedding - random_share_server
-        permuted_share_obfuscator = torch.zeros_like(random_share_obfuscator)
+        permuted_share_obfuscator = np.zeros_like(random_share_obfuscator)
         permuted_share_obfuscator[permutation] = random_share_obfuscator
         self.shared_rotated_word_embedding = random_share_server
         self.permutation = permutation
         return permuted_share_obfuscator
 
-def setup_pir_server(self):
-    # Build PIR Server
-    pir_db1 = self.permutation // 1000
-    pir_db2 = self.permutation % 1000
-    self.pir_server = PIRServer(pir_db1.tolist() + pir_db2.tolist())
-    return self.pir_server.lwe_mat, self.pir_server.setup()
+    def setup_pir_server(self):
+        # Build PIR Server
+        pir_db1 = self.permutation // 1000
+        pir_db2 = self.permutation % 1000
+        self.pir_server = PIRServer(pir_db1.tolist() + pir_db2.tolist())
+        return self.pir_server.lwe_mat, self.pir_server.setup()
 
 
 if __name__ == "__main__":
