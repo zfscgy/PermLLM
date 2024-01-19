@@ -17,6 +17,8 @@ class ChatGML6B:
     device: str = "cpu"
     dtype: torch.dtype = torch.half
 
+    max_token_id: int = 130005
+
     def __init__(self):
         self.tokenizer: ChatGLMTokenizer = ChatGLMTokenizer.from_pretrained(self.pretrained_model_path)
         self.condgen: ChatGLMForConditionalGeneration = \
@@ -79,7 +81,7 @@ class ChatGML6B:
         # Get the logits on the next position
 
         probs = torch.softmax(logits, dim=-1)  # [batch, length, n_tokens]
-        return probs[0, -1]
+        return probs[0, -1, :self.max_token_id]
 
     def greedy_generate(self, query: str, prob_generator: Callable, max_gen_length: int=200):
         input_ids, position_ids, attention_masks = self.get_tokenization(query)

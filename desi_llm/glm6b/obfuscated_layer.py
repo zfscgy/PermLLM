@@ -15,18 +15,18 @@ from desi_llm.glm6b.configs import GLM6BConfig
 
 
 class WrappedGLMBlock(nn.Module):
-    def __init__(self, original_glm_block: GLMBlock):
+    def __init__(self, layer_id: int):
         super(WrappedGLMBlock, self).__init__()
         self.model_dim = GLM6BConfig.model_dim
-        self.layer_id = original_glm_block.layer_id
-        self.num_attention_heads = original_glm_block.attention.num_attention_heads
+        self.layer_id = layer_id
+        self.num_attention_heads = GLM6BConfig.n_attention_heads
 
         self.attn_linear = nn.Linear(self.model_dim, self.model_dim, bias=True)
         self.post_attention_affine = nn.Linear(self.model_dim, self.model_dim, bias=True)
         self.mlp_linear1 = nn.Linear(self.model_dim, self.model_dim * 4)
         self.mlp_linear2 = nn.Linear(self.model_dim * 4, self.model_dim)
 
-
+    def wrap(self, original_glm_block: GLMBlock):
         # Clone all the weights
         self.attn_linear.weight.data = original_glm_block.attention.dense.weight.data.clone()
         self.attn_linear.bias.data = original_glm_block.attention.dense.bias.data.clone()
@@ -157,6 +157,11 @@ class WrappedGLMBlock(nn.Module):
         return normalized_output
 
 
+def copy_module(source_module: nn.Module, target_module: nn.Module):
+    for p_source, p_target in zip(source_module.parameters(), target_module.parameters()):
+        p_target.data = p_source.data.clone()
+
+
 class GLMBlockInputTransform(nn.Module):
     def __init__(self, original_glm: GLMBlock):
         super(GLMBlockInputTransform, self).__init__()
@@ -248,30 +253,39 @@ class ObfuscationKeys:
     mlp_output: TensorType
 
 
-def keys_to_tensor(keys: ObfuscationKeys, **kwargs):
+def keys_to_tensor(keys: ObfuscationKeys, device: str="cpu", float_type: torch.dtype=torch.float, int_type: torch.dtype=torch.int):
     def to_float_tensor(x):
         # For integer tensors, this is not needed
-        return torch.tensor(x, **kwargs)
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x)
+        return x.type(float_type).to(device)
+
+    def to_int_tensor(x):
+        if not isinstance(x, torch.Tensor):
+            x = torch.tensor(x)
+        return x.type(int_type).to(device)
+    
     return ObfuscationKeys(
-        qkv=((to_float_tensor(keys.qkv[0][0]), torch.tensor(keys.qkv[0][1])),
-             (to_float_tensor(keys.qkv[1][0]), torch.tensor(keys.qkv[1][1])),
-             (to_float_tensor(keys.qkv[2][0]), torch.tensor(keys.qkv[2][1]))),
+        qkv=((to_float_tensor(keys.qkv[0][0]), to_int_tensor(keys.qkv[0][1])),
+             (to_float_tensor(keys.qkv[1][0]), to_int_tensor(keys.qkv[1][1])),
+             (to_float_tensor(keys.qkv[2][0]), to_int_tensor(keys.qkv[2][1]))),
         attn_out=to_float_tensor(keys.attn_out),
-        mlp_hidden=torch.tensor(keys.mlp_hidden),
+        mlp_hidden=to_int_tensor(keys.mlp_hidden),
         mlp_output=to_float_tensor(keys.mlp_output)
     )
+
 
 
 def generate_obfuscation_keys(model_dim: int, n_heads: int) -> ObfuscationKeys:
     def get_multihead_keys():
         return np.stack([random_orthogonal(model_dim // n_heads) for _ in range(n_heads)]), np.random.permutation(n_heads)
 
-    return ObfuscationKeys(
+    return keys_to_tensor(ObfuscationKeys(
         qkv=(get_multihead_keys(), get_multihead_keys(), get_multihead_keys()),
         attn_out=random_orthogonal(model_dim),
         mlp_hidden=np.random.permutation(4 * model_dim),  # the hidden dim in MLP is 4 time the model dim
         mlp_output=random_orthogonal(model_dim)
-    )
+    ))
 
 
 def expand_segmented_keys(trans: TensorType, perm: TensorType):
@@ -280,26 +294,23 @@ def expand_segmented_keys(trans: TensorType, perm: TensorType):
     if isinstance(trans, np.ndarray):
         combiend_key = np.zeros([n_segs * seg_dim, n_segs * seg_dim], dtype=np.float32)
     else:
-        combiend_key = torch.zeros([n_segs * seg_dim, n_segs * seg_dim], dtype=torch.float)
+        combiend_key = torch.zeros([n_segs * seg_dim, n_segs * seg_dim], dtype=trans.dtype, device=trans.device)
 
     for i in range(n_segs):
         combiend_key[perm[i] * seg_dim: (perm[i] + 1) * seg_dim, perm[i] * seg_dim: (perm[i] + 1) * seg_dim] = trans[i]
     return combiend_key
 
 
-def obfuscate_transformer(transformer: WrappedGLMBlock, keys: ObfuscationKeys):
+def obfuscate_transformer(source_transformer: WrappedGLMBlock, keys: ObfuscationKeys, device: str="cuda"):
     """
-    Notice: This is an in-place function
-    Executed in CPU, dtype=float
-    :param transformer:
-    :param keys:
-    :return:
+    Obfuscate the transformer in device, and returns in CPU
     """
-    transformer = transformer.float()
+    transformer = WrappedGLMBlock(source_transformer.layer_id)
+    copy_module(source_transformer, transformer)
+    transformer = transformer.float().to(device)
 
+    keys = keys_to_tensor(keys, device)
     attn_cxt_key = expand_segmented_keys(*keys.qkv[2])
-
-    keys = keys_to_tensor(keys, dtype=torch.float)
 
     # Obfuscate the attention output
     transformer.attn_linear.weight.data = keys.attn_out @ transformer.attn_linear.weight.data @ attn_cxt_key.T
@@ -322,42 +333,10 @@ def obfuscate_transformer(transformer: WrappedGLMBlock, keys: ObfuscationKeys):
     transformer.mlp_linear2.weight.data = (keys.mlp_output @ transformer.mlp_linear2.weight.data)[:, keys.mlp_hidden]
     transformer.mlp_linear2.bias.data = keys.mlp_output @ transformer.mlp_linear2.bias.data + affine_bias_mask * (2 * 28) ** 0.5
 
+    return transformer.to("cpu")
 
 
 if __name__ == '__main__':
-    def test_wrapped_glm_block():
-        from llm_bases.chatglm6b import ChatGML6B
-        glm = ChatGML6B()
-        obf_layer = 10
-
-        input_transform = GLMBlockInputTransform(glm.condgen.transformer.layers[obf_layer]).half().to(glm.device)
-        wrapped_glm = WrappedGLMBlock(glm.condgen.transformer.layers[obf_layer]).half().to(glm.device)
-
-        def probability_generate_with_obfuscated(
-                input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: torch.Tensor):
-            hidden_state = glm.get_initial_state(input_ids)
-            hidden_state = glm.forward_layers(hidden_state, position_ids, attention_mask, 0, obf_layer)
-
-            # Test with the original transformer
-            # hidden_state = glm.condgen.transformer.layers[obf_layer](hidden_state, position_ids, attention_mask, obf_layer - 1)[0]
-
-            q0, k0, v0 = input_transform.projection_part_transform(hidden_state, position_ids)
-            q1, k1, v1 = input_transform.translation_part_transform(position_ids)
-            q, k, v = q0 + q1, k0 + k1, v0 + v1
-
-            hidden_state = wrapped_glm((q, k, v), attention_mask, hidden_state)
-
-            final_emb = glm.forward_layers(hidden_state, position_ids, attention_mask, obf_layer + 1)
-
-            logits = glm.condgen.lm_head(final_emb).permute(1, 0, 2).contiguous()[..., -1, :]
-            # Get the logits on the next position
-
-            probs = torch.softmax(logits, dim=-1)  # [batch, n_tokens]
-            return probs
-
-        resp = glm.greedy_generate("你是谁？", partial(probability_generate_with_obfuscated))
-        print(resp)
-
     def test_obfuscate_one_layer():
         from llm_bases.chatglm6b import ChatGML6B
         glm = ChatGML6B()
@@ -367,7 +346,9 @@ if __name__ == '__main__':
 
         # Convert to the float
         input_transform = GLMBlockInputTransform(transformer_to_obfuscate)
-        wrapped_glm = WrappedGLMBlock(transformer_to_obfuscate)
+        wrapped_glm = WrappedGLMBlock(transformer_to_obfuscate.layer_id)
+        wrapped_glm.wrap(transformer_to_obfuscate)
+
         keys = generate_obfuscation_keys(GLM6BConfig.model_dim, GLM6BConfig.n_attention_heads)
         expand_v_key = expand_segmented_keys(*keys.qkv[2])
         obfuscate_transformer(wrapped_glm, keys)
