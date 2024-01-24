@@ -12,12 +12,12 @@ class ObfuscatorNode:
     def __init__(self) -> None:
         self.key = None
     
-    def obfuscate(self, block: WrappedGLMBlock) -> WrappedGLMBlock:
+    def obfuscate(self, block: WrappedGLMBlock, device: str="cpu") -> WrappedGLMBlock:
         """
         Generate the obfuscated block (in-place)
         """
-        self.key = generate_obfuscation_keys(GLM6BConfig.model_dim, GLM6BConfig.n_attention_heads)
-        return obfuscate_transformer(block, self.key)
+        self.key = generate_obfuscation_keys(GLM6BConfig.model_dim, GLM6BConfig.n_attention_heads, device)
+        return obfuscate_transformer(block, self.key, device)
     
     def forward_pass(self, x, key_name: str, reverse: bool = False):
         """

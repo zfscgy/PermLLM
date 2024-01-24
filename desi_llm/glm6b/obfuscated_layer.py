@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from functools import partial
 
 from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock, SelfAttention, attention_fn
-from desi_llm.common.utils import random_orthogonal, inverse_permutation, quantize
+from desi_llm.common.utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed
 from desi_llm.glm6b.configs import GLM6BConfig
 
 
@@ -88,7 +88,7 @@ class WrappedGLMBlock(nn.Module):
             # if auto-regressive, skip
             attention_scores.masked_fill_(attention_mask, -10000.0)
         dtype = attention_scores.dtype
-        attention_scores = attention_scores.float()
+        attention_scores = attention_scores.half()
         attention_scores = attention_scores * query_key_layer_scaling_coeff
 
         attention_probs = F.softmax(attention_scores, dim=-1)
@@ -182,7 +182,7 @@ class GLMBlockInputTransform(nn.Module):
         dim = self.model_dim // (self.n_attention_heads * 2)
         # [head_dim / 2]
 
-        self.inv_freq = nn.Parameter(1. / (10000 ** (torch.arange(0, dim, 2).float() / dim)), requires_grad=False)
+        self.inv_freq = nn.Parameter(1. / (10000 ** (torch.arange(0, dim, 2).half() / dim)), requires_grad=False)
         # [head_dim / 4]
 
 
@@ -228,10 +228,24 @@ class GLMBlockInputTransform(nn.Module):
         qkv = self.input_affine.bias @ self.linear_qkv.weight.T + self.linear_qkv.bias
         qkv = qkv.view(*qkv.shape[:-1], self.n_attention_heads, 3 * self.model_dim // self.n_attention_heads)
         q, k, v = qkv.chunk(3, dim=-1)
+        q, k = self.apply_position_embedding(q, k, position_ids)
         return q, k, v
+    
+    def forward(self, xs: torch.Tensor, position_ids: torch.Tensor=None, only_projection: bool=False, only_affine: bool=False):
+        if only_affine:
+            y = xs @ self.input_affine.weight.T
+            if not only_projection:
+                y += self.input_affine.bias
+            return y
+        else:
+            q0, k0, v0 = self.projection_part_transform(xs, position_ids)
+            if not only_projection:
+                q1, k1, v1 = self.translation_part_transform(position_ids)
+                return q0 + q1, k0 + k1, v0 + v1
+            else:
+                return q0, k0, v0
+        
 
-
-TensorType = Union[torch.Tensor, np.ndarray]
 
 @dataclass
 class ObfuscationKeys:
@@ -247,10 +261,10 @@ class ObfuscationKeys:
     mlp_output
 
     """
-    qkv: Tuple[Tuple[TensorType, TensorType], Tuple[TensorType, TensorType], Tuple[TensorType, TensorType]]
-    attn_out: TensorType
-    mlp_hidden: TensorType
-    mlp_output: TensorType
+    qkv: Tuple[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]
+    attn_out: torch.Tensor
+    mlp_hidden: torch.Tensor
+    mlp_output: torch.Tensor
 
 
 def keys_to_tensor(keys: ObfuscationKeys, device: str="cpu", float_type: torch.dtype=torch.float, int_type: torch.dtype=torch.int):
@@ -276,26 +290,24 @@ def keys_to_tensor(keys: ObfuscationKeys, device: str="cpu", float_type: torch.d
 
 
 
-def generate_obfuscation_keys(model_dim: int, n_heads: int) -> ObfuscationKeys:
+def generate_obfuscation_keys(model_dim: int, n_heads: int, device:str="cpu") -> ObfuscationKeys:
     def get_multihead_keys():
-        return np.stack([random_orthogonal(model_dim // n_heads) for _ in range(n_heads)]), np.random.permutation(n_heads)
-
+        return torch.stack([random_orthonormal(model_dim // n_heads, device=device) for _ in range(n_heads)]), \
+               torch.tensor(np.random.permutation(n_heads), device=device)
+    trans_qk, perm_qk = get_multihead_keys()
+    trans_v, _ = get_multihead_keys()
     return keys_to_tensor(ObfuscationKeys(
-        qkv=(get_multihead_keys(), get_multihead_keys(), get_multihead_keys()),
-        attn_out=random_orthogonal(model_dim),
-        mlp_hidden=np.random.permutation(4 * model_dim),  # the hidden dim in MLP is 4 time the model dim
-        mlp_output=random_orthogonal(model_dim)
+        qkv=((trans_qk, perm_qk), (trans_qk, perm_qk), (trans_v, perm_qk)),
+        attn_out=random_orthonormal(model_dim),
+        mlp_hidden=torch.tensor(np.random.permutation(4 * model_dim), device=device),  # the hidden dim in MLP is 4 time the model dim
+        mlp_output=random_orthonormal(model_dim)
     ))
 
 
-def expand_segmented_keys(trans: TensorType, perm: TensorType):
+def expand_segmented_keys(trans: torch.Tensor, perm: torch.Tensor):
     n_segs = trans.shape[0]
     seg_dim = trans.shape[1]
-    if isinstance(trans, np.ndarray):
-        combiend_key = np.zeros([n_segs * seg_dim, n_segs * seg_dim], dtype=np.float32)
-    else:
-        combiend_key = torch.zeros([n_segs * seg_dim, n_segs * seg_dim], dtype=trans.dtype, device=trans.device)
-
+    combiend_key = torch.zeros([n_segs * seg_dim, n_segs * seg_dim], dtype=trans.dtype, device=trans.device)
     for i in range(n_segs):
         combiend_key[perm[i] * seg_dim: (perm[i] + 1) * seg_dim, perm[i] * seg_dim: (perm[i] + 1) * seg_dim] = trans[i]
     return combiend_key
@@ -308,13 +320,12 @@ def obfuscate_transformer(source_transformer: WrappedGLMBlock, keys: Obfuscation
     transformer = WrappedGLMBlock(source_transformer.layer_id)
     copy_module(source_transformer, transformer)
     transformer = transformer.float().to(device)
-
     keys = keys_to_tensor(keys, device)
     attn_cxt_key = expand_segmented_keys(*keys.qkv[2])
 
     # Obfuscate the attention output
     transformer.attn_linear.weight.data = keys.attn_out @ transformer.attn_linear.weight.data @ attn_cxt_key.T
-    transformer.attn_linear.bias.data = keys.attn_out @ transformer.attn_linear.bias.data @ attn_cxt_key.T
+    transformer.attn_linear.bias.data = keys.attn_out @ transformer.attn_linear.bias.data
 
     # Obfuscate the affine weights
     # Due to the residual connection, the keys is the same as mlp out key
@@ -322,74 +333,92 @@ def obfuscate_transformer(source_transformer: WrappedGLMBlock, keys: Obfuscation
     mlp_input_key = keys.mlp_output
 
     transformer.post_attention_affine.weight.data = mlp_input_key @ transformer.post_attention_affine.weight.data @ keys.attn_out.T
-    affine_bias_mask = torch.rand_like(transformer.post_attention_affine.bias.data)
+    affine_bias_mask = torch.zeros_like(transformer.post_attention_affine.bias.data)
     transformer.post_attention_affine.bias.data = mlp_input_key @ transformer.post_attention_affine.bias.data - affine_bias_mask
     
     # Obfuscate the mlp hidden layer
     transformer.mlp_linear1.weight.data = (transformer.mlp_linear1.weight.data @ mlp_input_key.T)[keys.mlp_hidden]
-    transformer.mlp_linear1.bias.data = (transformer.mlp_linear1.bias.data - transformer.mlp_linear1.weight @ affine_bias_mask)[keys.mlp_hidden]
+    transformer.mlp_linear1.bias.data = transformer.mlp_linear1.bias.data[keys.mlp_hidden] + transformer.mlp_linear1.weight.data @ affine_bias_mask
 
     # Obfuscate the mlp out layer
-    transformer.mlp_linear2.weight.data = (keys.mlp_output @ transformer.mlp_linear2.weight.data)[:, keys.mlp_hidden]
+    transformer.mlp_linear2.weight.data = keys.mlp_output @ transformer.mlp_linear2.weight.data[:, keys.mlp_hidden]
     transformer.mlp_linear2.bias.data = keys.mlp_output @ transformer.mlp_linear2.bias.data + affine_bias_mask * (2 * 28) ** 0.5
 
-    return transformer.to("cpu")
+    return transformer.cpu()
 
 
 if __name__ == '__main__':
     def test_obfuscate_one_layer():
         from llm_bases.chatglm6b import ChatGML6B
+        device_name = "cuda:2"
+
         glm = ChatGML6B()
         obf_layer = 10
 
-        transformer_to_obfuscate = glm.condgen.transformer.layers[obf_layer].float()
+        transformer_to_obfuscate = glm.condgen.transformer.layers[obf_layer].half().to(device_name)
 
         # Convert to the float
         input_transform = GLMBlockInputTransform(transformer_to_obfuscate)
         wrapped_glm = WrappedGLMBlock(transformer_to_obfuscate.layer_id)
         wrapped_glm.wrap(transformer_to_obfuscate)
+        wrapped_glm.float().to(device_name)
 
-        keys = generate_obfuscation_keys(GLM6BConfig.model_dim, GLM6BConfig.n_attention_heads)
-        expand_v_key = expand_segmented_keys(*keys.qkv[2])
-        obfuscate_transformer(wrapped_glm, keys)
+        keys_0 = generate_obfuscation_keys(GLM6BConfig.model_dim, GLM6BConfig.n_attention_heads, device_name)
+        keys_1 = generate_obfuscation_keys(GLM6BConfig.model_dim, GLM6BConfig.n_attention_heads, device_name)
+        keys_0 = keys_to_tensor(keys_0, device=device_name, float_type=torch.float)
+        keys_1 = keys_to_tensor(keys_1, device=device_name, float_type=torch.float)
 
-        device_name = "cuda:1"
-        glm.device = device_name
-        glm.condgen.to(device_name)
-        wrapped_glm = wrapped_glm.half().to(device_name)
+        obfuscated_glm = obfuscate_transformer(obfuscate_transformer(wrapped_glm, keys_0, device_name), keys_1, device_name).half().to(device_name)
+        
+        keys_0 = keys_to_tensor(keys_0, device=device_name, float_type=torch.half)
+        keys_1 = keys_to_tensor(keys_1, device=device_name, float_type=torch.half)
+        
         input_transform = input_transform.half().to(device_name)
-        expand_v_key = torch.tensor(expand_v_key).half().to(device_name)
-        keys = keys_to_tensor(keys, dtype=torch.half, device=device_name)
+        wrapped_glm.half().to(device_name)
 
-        def probability_generate_with_obfuscated(
-                input_ids: torch.Tensor, position_ids: torch.Tensor, attention_mask: torch.Tensor):
-            hidden_state = glm.get_initial_state(input_ids)
-            hidden_state = glm.forward_layers(hidden_state, position_ids, attention_mask, 0, obf_layer)
+        glm.device = device_name
+        glm.condgen.transformer.word_embeddings.to(device_name)
+        glm.condgen.lm_head.to(device_name)
 
-            # Test with the original transformer
-            # hidden_state = glm.condgen.transformer.layers[obf_layer](hidden_state, position_ids, attention_mask, obf_layer - 1)[0]
 
-            q0, k0, v0 = input_transform.projection_part_transform(hidden_state, position_ids)
-            q1, k1, v1 = input_transform.translation_part_transform(position_ids)
-            q, k, v = q0 + q1, k0 + k1, v0 + v1
 
-            v = v.view(*v.shape[:-2], GLM6BConfig.model_dim) @ expand_v_key.T
-            v = v.view(*v.shape[:-1], GLM6BConfig.n_attention_heads, GLM6BConfig.model_dim // GLM6BConfig.n_attention_heads)
+        tokenization = glm.get_tokenization("你是谁？")
+        input_state = torch.tensor(random_vec_with_seed(1926, [5, 1, GLM6BConfig.model_dim], [-1, 1])).half().to(device_name)
+        expected_output0 = transformer_to_obfuscate(input_state, tokenization[1], tokenization[2], torch.tensor(obf_layer))[0]
+        expected_output0 = F.layer_norm(expected_output0, [4096])
+        input_state = F.layer_norm(input_state, [4096])
 
-            hidden_state = wrapped_glm((q, k, v), attention_mask, hidden_state @ expand_v_key.T)
 
-            hidden_state = hidden_state @ keys.mlp_output
+        q, k, v = input_transform(input_state, tokenization[1])
+        residual = input_transform(input_state, only_affine=True)
 
-            final_emb = glm.forward_layers(hidden_state, position_ids, attention_mask, obf_layer + 1)
+        expand_q_key_0 = expand_segmented_keys(*keys_0.qkv[0])
+        expand_q_key_1 = expand_segmented_keys(*keys_1.qkv[0])
 
-            logits = glm.condgen.lm_head(final_emb).permute(1, 0, 2).contiguous()[..., -1, :]
-            # Get the logits on the next position
+        expand_k_key_0 = expand_segmented_keys(*keys_0.qkv[1])
+        expand_k_key_1 = expand_segmented_keys(*keys_1.qkv[1])
 
-            probs = torch.softmax(logits, dim=-1)  # [batch, n_tokens]
-            return probs
+        expand_v_key_0 = expand_segmented_keys(*keys_0.qkv[2])
+        expand_v_key_1 = expand_segmented_keys(*keys_1.qkv[2])
 
-        resp = glm.greedy_generate("你是谁？", partial(probability_generate_with_obfuscated))
-        print(resp)
+        qo = q.view(*q.shape[:-2], GLM6BConfig.model_dim) @ expand_q_key_0.T @ expand_q_key_1.T
+        qo = qo.view(*q.shape[:-2], GLM6BConfig.n_attention_heads, GLM6BConfig.model_dim // GLM6BConfig.n_attention_heads)
+
+        ko = k.view(*k.shape[:-2], GLM6BConfig.model_dim) @ expand_k_key_0.T @ expand_k_key_1.T
+        ko = ko.view(*k.shape[:-2], GLM6BConfig.n_attention_heads, GLM6BConfig.model_dim // GLM6BConfig.n_attention_heads)
+
+        vo = v.view(*v.shape[:-2], GLM6BConfig.model_dim) @ expand_v_key_0.T @ expand_v_key_1.T
+        vo = vo.view(*v.shape[:-2], GLM6BConfig.n_attention_heads, GLM6BConfig.model_dim // GLM6BConfig.n_attention_heads)
+
+        expected_output1 = wrapped_glm((q, k, v), tokenization[2].to(device_name), residual)
+
+        obfuscated_output = obfuscated_glm((qo, ko, vo), tokenization[2].to(device_name), residual @ keys_0.attn_out.T @ keys_1.attn_out.T)
+        actual_output = obfuscated_output @ keys_1.mlp_output @ keys_0.mlp_output
+
+        print(expected_output0)
+        print(expected_output1)
+        print(actual_output)
+
 
     # test_wrapped_glm_block()
     test_obfuscate_one_layer()

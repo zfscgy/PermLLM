@@ -1,3 +1,4 @@
 .vscode
 __pycache__/
 desi_llm/saved_model
+tmp

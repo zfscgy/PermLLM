@@ -5,13 +5,14 @@ from IPython import embed
 import numpy as np
 from sympy import Mod
 
+import torch.nn.functional as F
 
 from simple_pir.pir import PIRServer, PIRClient
 
 from llm_bases.chatglm6b import ChatGML6B
 from desi_llm.common.utils import random_vec_with_seed
 from desi_llm.glm6b.configs import GLM6BConfig
-from desi_llm.glm6b.obfuscated_layer import WrappedGLMBlock, GLMBlockInputTransform, random_orthogonal
+from desi_llm.glm6b.obfuscated_layer import WrappedGLMBlock, GLMBlockInputTransform, random_orthonormal
 from desi_llm.nodes.obfuscator import ObfuscatorNode
 
 
@@ -37,10 +38,10 @@ class ModelProvider:
         self.pir_server: PIRServer = None
 
 
-    def generate_obfuscations(self):
+    def generate_obfuscations(self, device:str="cpu"):
         obfuscated_layers = []
         for obfuscator, layer in zip(self.obfuscation_nodes, self.original_layers):
-            obfuscated_layers.append(obfuscator.obfuscate(layer))
+            obfuscated_layers.append(obfuscator.obfuscate(layer, device))
         return obfuscated_layers
 
     def generate_shared_embedding(self) -> np.ndarray:
@@ -50,10 +51,10 @@ class ModelProvider:
             * (lwe_mat, hint)    for user: the lwe matrix and the hint for PIR
 
         """
-        self.word_embedding_key = random_orthogonal(GLM6BConfig.model_dim)
+        self.word_embedding_key = random_orthonormal(GLM6BConfig.model_dim).cpu().numpy()
         # Extract embedding to numpy
-        embedding = self.full_model.condgen.transformer.word_embeddings.weight[:ChatGML6B.max_token_id].numpy().astype(np.float32)  # [vocab_size, model_dim]
-        
+        embedding = self.full_model.condgen.transformer.word_embeddings.weight[:ChatGML6B.max_token_id]  # [vocab_size, model_dim]
+        embedding = F.layer_norm(embedding.float(), [embedding.shape[1]]).numpy().astype(np.float32)
         # Rotate the embedding
         rotated_embedding = embedding @ self.word_embedding_key.T
 
@@ -67,6 +68,7 @@ class ModelProvider:
         permuted_share_obfuscator[permutation] = random_share_obfuscator
         self.shared_rotated_word_embedding = random_share_server
         self.permutation = permutation
+        self.word_embedding = embedding
         return permuted_share_obfuscator
 
     def setup_pir_server(self):

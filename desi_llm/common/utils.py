@@ -3,31 +3,51 @@ import numpy as np
 import torch
 
 
-def inverse_permutation(perm: np.ndarray) -> np.ndarray:
+def inverse_permutation(perm: Union[np.ndarray, torch.Tensor], device: str="cpu") -> torch.Tensor:
     assert len(perm.shape) == 1, "The perm must be a 1-d array"
-    inv_perm = np.zeros_like(perm)
-    inv_perm[perm] = np.arange(perm.shape[0])
+    if isinstance(perm, np.ndarray):
+        perm = torch.tensor(perm, device=device)
+    inv_perm = torch.zeros_like(perm)
+    inv_perm[perm] = torch.arange(perm.shape[0], dtype=perm.dtype, device=perm.device)
     return inv_perm
 
 
-def random_orthogonal(dim: int) -> np.ndarray:
-    m = np.random.rand(dim, dim)
-    q, r = np.linalg.qr(m)
+def random_orthonormal_qr(dim: int, device: str="cpu") -> torch.Tensor:
+    m = torch.normal(0, 1, [dim, dim], device=device)
+    q, r = torch.linalg.qr(m)
+    d = torch.diagonal(r)
+    q *= d / torch.abs(d)
     return q
 
 
-def quantize(x: torch.Tensor, n_bins: int) -> np.ndarray:
+def random_orthonormal_household(dim: int, n: int=10, device: str="cpu")->torch.Tensor:
+    m = torch.eye(dim, dim)
+    def household():
+        v = torch.normal(0, 1, [dim, 1])
+        v = v / torch.norm(v)
+        return m - 2 * v @ v.T
+    
+    p = m
+    for i in range(n):
+        p @= household()
+    return p
+
+
+random_orthonormal = random_orthonormal_household
+
+
+def quantize(x: torch.Tensor, n_bins: int) -> torch.Tensor:
     bin_size = (x.max() - x.min()) / n_bins
     return torch.round((x - x.min()) / bin_size) * bin_size + x.min()
 
 
-def random_vec_with_seed(seed, size: Union[int, Collection[int]], range: Tuple[int, int]):
+def random_vec_with_seed(seed, size: Union[int, Collection[int]], range: Tuple[int, int]) -> np.ndarray:
     random_generator = np.random.default_rng(seed)
     random_vec = random_generator.uniform(range[0], range[1], size)
     return random_vec
 
 
-def generate_random_transformations(batch_size: int, n_random_vectors: int, ensure_sum_one: bool = True, dtype: torch.dtype = torch.float, device: str = "cpu"):
+def generate_random_transformations(batch_size: int, n_random_vectors: int, ensure_sum_one: bool = True, dtype: torch.dtype = torch.float, device: str = "cpu") -> torch.Tensor:
     inverse_transformation = torch.normal(0, 10, [batch_size, n_random_vectors, n_random_vectors], dtype=dtype, device=device)
     if ensure_sum_one:
         inverse_transformation /= torch.sum(inverse_transformation, dim=1, keepdim=True)
@@ -35,7 +55,7 @@ def generate_random_transformations(batch_size: int, n_random_vectors: int, ensu
     return transformation, inverse_transformation
 
 
-def generate_random_linear_combination(xs: torch.Tensor, n_random_vectors: int, transformation: torch.Tensor):
+def generate_random_linear_combination(xs: torch.Tensor, n_random_vectors: int, transformation: torch.Tensor) -> torch.Tensor:
     """
     xs: [batch, n', dim], where n' < n_random_vectors
     Represent a vector by a linear combination of multiple vectors with different coefficients.
@@ -46,7 +66,7 @@ def generate_random_linear_combination(xs: torch.Tensor, n_random_vectors: int, 
     rand_vecs = torch.bmm(transformation, xs)  # batched matarix multiplication
     return rand_vecs
 
-def reconstruct_random_linear_combination(linear_combinations: torch.Tensor, inverse_transformation: torch.Tensor):
+def reconstruct_random_linear_combination(linear_combinations: torch.Tensor, inverse_transformation: torch.Tensor) -> torch.Tensor:
     """
     linear_combinations: [batch, n_random_vectors, dim]
     """
@@ -56,6 +76,10 @@ def reconstruct_random_linear_combination(linear_combinations: torch.Tensor, inv
 
 
 if __name__ == "__main__":
+    def test_random_orthonormal():
+        m = random_orthonormal(4096)
+        print(m @ m.T)
+
     def test_generate_random_linear_combination():
         transformation, inverse_transformation = generate_random_transformations(1, 3)
         xs = torch.tensor([[[8964., 1926, 817, 1, 2, 3, 4, 5]]])
@@ -64,5 +88,5 @@ if __name__ == "__main__":
 
         print(reconstructed)
     
-
-    test_generate_random_linear_combination()
+    test_random_orthonormal()
+    # test_generate_random_linear_combination()

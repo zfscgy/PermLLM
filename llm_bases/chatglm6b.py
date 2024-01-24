@@ -35,6 +35,9 @@ class ChatGML6B:
     2.  Reconstruct the input given the hidden states
     """
     def get_tokenization(self, query: str):
+        """
+        Return: input_ids, position_ids, attention_masks
+        """
         tokenization = self.tokenizer(query, return_tensors="pt", padding=True).to(self.device)
         return tokenization.input_ids, tokenization.position_ids, tokenization.attention_mask
 
