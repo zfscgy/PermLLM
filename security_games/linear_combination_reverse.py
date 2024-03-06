@@ -22,7 +22,7 @@ def test_recover_word():
     # random_vecs += torch.normal(0, 0.2, random_vecs.shape, device=random_vecs.device, dtype=random_vecs.dtype)
     # print(torch.dist(random_vecs.T @ input_embeddings, random_vecs.T @ torch.stack([embedding0])))
     least_square_errors = []
-    for i in tqdm.tqdm(range(chatglm6b.max_token_id)):
+    for i in tqdm.tqdm(range(chatglm6b.n_tokens)):
         candiate_embedding = chatglm6b.condgen.transformer.word_embeddings.weight.data[i].float().to(random_vecs.device)
         solution = torch.linalg.lstsq(random_vecs.T, candiate_embedding[:, None])
         least_square_errors.append(torch.dist(random_vecs.T @ solution[0], candiate_embedding[:, None]).item())

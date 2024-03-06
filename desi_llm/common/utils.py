@@ -20,20 +20,20 @@ def random_orthonormal_qr(dim: int, device: str="cpu") -> torch.Tensor:
     return q
 
 
-def random_orthonormal_household(dim: int, n: int=10, device: str="cpu")->torch.Tensor:
-    m = torch.eye(dim, dim)
+def random_orthonormal_household_permuted(dim: int, n: int=10, device: str="cpu")->torch.Tensor:
+    m = torch.eye(dim, dim, device=device)[torch.randperm(dim, device=device)]
     def household():
-        v = torch.normal(0, 1, [dim, 1])
+        v = torch.normal(0, 1, [dim, 1], device=device)
         v = v / torch.norm(v)
-        return m - 2 * v @ v.T
-    
+        return (m - 2 * v @ v.T)[torch.randperm(dim, device=device)][:, torch.randperm(dim, device=device)]
+
     p = m
-    for i in range(n):
+    for _ in range(n):
         p @= household()
     return p
 
 
-random_orthonormal = random_orthonormal_household
+random_orthonormal = random_orthonormal_household_permuted
 
 
 def quantize(x: torch.Tensor, n_bins: int) -> torch.Tensor:
@@ -55,16 +55,18 @@ def generate_random_transformations(batch_size: int, n_random_vectors: int, ensu
     return transformation, inverse_transformation
 
 
-def generate_random_linear_combination(xs: torch.Tensor, n_random_vectors: int, transformation: torch.Tensor) -> torch.Tensor:
+def generate_random_linear_combination(xs: torch.Tensor, transformation: torch.Tensor) -> torch.Tensor:
     """
     xs: [batch, n', dim], where n' < n_random_vectors
     Represent a vector by a linear combination of multiple vectors with different coefficients.
     """
     scale = xs.abs().max()
+    n_random_vectors = transformation.shape[1]
     if xs.shape[1] < n_random_vectors:
         xs = torch.cat([xs, 2 * scale * torch.rand(xs.shape[0], n_random_vectors - xs.shape[1], xs.shape[2], dtype=xs.dtype, device=xs.device) - scale], dim=1)
     rand_vecs = torch.bmm(transformation, xs)  # batched matarix multiplication
     return rand_vecs
+
 
 def reconstruct_random_linear_combination(linear_combinations: torch.Tensor, inverse_transformation: torch.Tensor) -> torch.Tensor:
     """
@@ -74,19 +76,17 @@ def reconstruct_random_linear_combination(linear_combinations: torch.Tensor, inv
     return reconstructed_vecs
 
 
-
 if __name__ == "__main__":
     def test_random_orthonormal():
         m = random_orthonormal(4096)
         print(m @ m.T)
 
     def test_generate_random_linear_combination():
-        transformation, inverse_transformation = generate_random_transformations(1, 3)
-        xs = torch.tensor([[[8964., 1926, 817, 1, 2, 3, 4, 5]]])
-        vecs = generate_random_linear_combination(xs, 3, transformation)
+        transformation, inverse_transformation = generate_random_transformations(2, 3)
+        xs = torch.tensor([[[8964., 1926, 817, 1, 2, 3, 4, 5]], [[1, 2, 3, 4, 5, 8964, 817, 1926]]])
+        vecs = generate_random_linear_combination(xs, transformation)
         reconstructed = reconstruct_random_linear_combination(vecs, inverse_transformation)
-
         print(reconstructed)
-    
+
     test_random_orthonormal()
     # test_generate_random_linear_combination()
