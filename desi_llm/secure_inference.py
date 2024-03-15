@@ -1,5 +1,5 @@
 from logging import config
-from typing import List
+from typing import Any, List
 from dataclasses import dataclass
 
 
@@ -13,7 +13,7 @@ from zmq import device
 
 
 from llm_bases.chatglm6b import ChatGML6B
-from simple_pir.pir import PIRClient
+from simple_pir.pir import PIRClient, PIRServer
 from ckks.crypto import CKKS
 
 from desi_llm.glm6b.obfuscated_layer import WrappedGLMBlock, keys_to_tensor
@@ -62,19 +62,42 @@ class NetworkSimulator:
         self.latency = latency
         self.speed = speed
     
-        self.total_time: int = 0
-        self.total_comm: float = 0
-
         self.all_history = []
     
-    def transfer(self, m, desc: str = ""):
-        m_size = estimate_size(m)
+    def new_stage(self, name: str):
+        self.all_history.append({
+            "stage": name,
+            "transmissions": [] 
+        })
+
+    def transfer(self, message: Any, source: str, target: str, desc: str = ""):
+        m_size = estimate_size(message)
         self.total_comm += m_size
-
         m_time = self.latency + (self.total_comm) / self.speed
-        self.total_time += m_time
-        self.all_history.append((m_size, m_time, desc))
+        self.all_history[-1]['transmissions'].append({
+            "from": source,
+            "to": target,
+            "size": m_size,
+            "time": m_time
+        })
 
+    def compute_total_time(self):
+        stage_times = []
+        total_time = 0
+        for his in self.all_history:
+            ts = [trans['time'] for trans in his['transmissions']]
+            total_time += max(ts)
+            stage_times.append(total_time)
+        return stage_times
+    
+    def compute_total_comm(self):
+        stage_comms = []
+        total_comm = 0
+        for his in self.all_history:
+            ts = [trans['size'] for trans in his['transmissions']]
+            total_time += sum(ts)
+            stage_comms.append(total_comm)
+        return stage_comms
 
 @dataclass
 class DesiLLMConfig:
@@ -99,30 +122,50 @@ class DesiLLM:
         # Model provider work:
         self.model_provider = ModelProvider(self.glm6b)
 
+
         self.obfuscators = []
         self.computation_nodes = []
         for layer in tqdm.tqdm(self.glm6b.condgen.transformer.layers):
             self.obfuscators.append(ObfuscatorNode())
             self.computation_nodes.append(ComputationNode(WrappedGLMBlock(layer.layer_id)))
+        self.ckks_scheme = CKKS()
+        self.model_save_dir = "./saved_model/"
 
         print("Model provider setup PIR sever...")
         # Generte PIR hints
-        self.rotated_word_embedding_share_obfuscator = self.model_provider.generate_shared_embedding()
-        pir_lwe_mat, pir_hint = self.model_provider.setup_pir_server()
-        print("User creating PIR client...")
-        self.pir_client = PIRClient(pir_lwe_mat, pir_hint, self.model_provider.pir_server.get_scale_factor(), self.model_provider.pir_server.plain_modulus)
+        self.embedding_share_1, self.embedding_share_2 = self.model_provider.generate_shared_embeddings()
+        pir_lwe_mat_0, pir_hint_0 = self.model_provider.setup_pir_server()
+
+        print("Embedding share holder setup PIR server...")
+        self.embedding_perm_1 = np.random.permutation(self.embedding_share_1.shape[0])  # Held by P2
+        self.embedding_perm_2 = np.random.permutation(self.embedding_share_1.shape[0])  # Held by P1
+        self.embedding_share_1 = self.embedding_share_1[torch.tensor(self.embedding_perm_1, dtype=torch.int)]
+        self.embedding_share_2 = self.embedding_share_2[torch.tensor(self.embedding_perm_2, dtype=torch.int)]
+        
+        pir_db_1 = np.stack([self.embedding_perm_1 // 1000, self.embedding_perm_1 % 1000], axis=1).flatten().tolist()
+        self.pir_server_1 = PIRServer(pir_db_1)
+
+        pir_db_2 = np.stack([self.embedding_perm_2 // 1000, self.embedding_perm_2 % 1000], axis=1).flatten().tolist()
+        self.pir_server_2 = PIRServer(pir_db_2)
+
+        pir_hint_1 = self.pir_server_1.generate_hint()
+        pir_hint_2 = self.pir_server_2.generate_hint()
+
+
+        print("User creating PIR clients...")
+        self.pir_client_0 = PIRClient(pir_lwe_mat_0, pir_hint_0, self.model_provider.pir_server.get_scale_factor(), self.model_provider.pir_server.plain_modulus)
+        self.pir_client_1 = PIRClient(self.pir_server_1.lwe_mat, pir_hint_1, self.pir_server_1.get_scale_factor(), self.pir_server_1.plain_modulus)
+        self.pir_client_2 = PIRClient(self.pir_server_2.lwe_mat, pir_hint_2, self.pir_server_2.get_scale_factor(), self.pir_server_2.plain_modulus)
 
 
         print("Start to load saved obfuscated models...")
         # Load all the obfuscated models
-        model_save_dir = "./saved_model/"
-
         for i, computation_node in tqdm.tqdm(enumerate(self.computation_nodes)):
-            computation_node.layer.load_state_dict(torch.load(model_save_dir + f"wrappedGLM_{i}.pth", map_location="cpu"))
+            computation_node.layer.load_state_dict(torch.load(self.model_save_dir + f"wrappedGLM_{i}.pth", map_location="cpu"))
 
         for i, obfuscator in tqdm.tqdm(enumerate(self.obfuscators)):
-            obfuscator.key = torch.load(model_save_dir + f"obfuscatorKey_{i}.pth", map_location="cpu")
-            self.model_provider.obfuscators[i].key = torch.load(model_save_dir + f"providerKey_{i}.pth", map_location="cpu")
+            obfuscator.key = torch.load(self.model_save_dir + f"obfuscatorKey_{i}.pth", map_location="cpu")
+            self.model_provider.obfuscators[i].key = torch.load(self.model_save_dir + f"providerKey_{i}.pth", map_location="cpu")
         
 
         print("Start to load models to the designated device...")
@@ -139,10 +182,31 @@ class DesiLLM:
         self.model_provider.word_embedding_key_device = torch.tensor(self.model_provider.word_embedding_key).half().to(device)
         self.glm6b.condgen.lm_head.to(device)
 
-        self.ckks_scheme = CKKS()
+    def reset_all(self, device: str="cuda"):
+        # Re-generate all the obfuscations (!!! Taking a long time, can be hours !!!)
+        print("Model provider generating obfuscated layers...")
+        obfuscated_layers = self.model_provider.generate_obfuscations(device)
+        # Set up obfuscator nodes and computation nodes
+        obfuscators = []
+        computation_nodes = []
+        for obfuscated_layer in tqdm.tqdm(obfuscated_layers):
+            obfuscator = ObfuscatorNode()
+            obfuscators.append(obfuscator)
+            # Twice-obfuscation
+            computation_nodes.append(ComputationNode(obfuscator.obfuscate(obfuscated_layer, device)))
+
+        # Save all the obfuscated models
+        for i, computation_node in tqdm.tqdm(enumerate(computation_nodes)):
+            torch.save(computation_node.layer.state_dict(), self.model_save_dir + f"wrappedGLM_{i}.pth")
+
+        for i, obfuscator in tqdm.tqdm(enumerate(obfuscators)):
+            torch.save(obfuscator.key, self.model_save_dir + f"obfuscatorKey_{i}.pth")
+            torch.save(self.model_provider.obfuscation_nodes[i].key, self.model_save_dir + f"providerKey_{i}.pth")
 
 
     def retrieve_word_embedding(self, token_ids: List[int]):
+        self.network_simulator.new_stage("Embedding Retrieval")
+
         query_ids = token_ids + [t + self.glm6b.n_tokens for t in token_ids]
         # Client make PIR queries
         pir_queries = [self.pir_client.query(i) for i in query_ids]

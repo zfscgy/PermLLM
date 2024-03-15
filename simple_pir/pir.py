@@ -15,17 +15,14 @@ class PIRServer:
                              f"or be negative!")
 
         n_rows = n_cols = np.ceil(np.sqrt(len(database))).astype(int)
-        self.data_matrix = np.zeros((n_rows, n_cols), dtype=np.uint32)
-        index1d = np.arange(0, len(database))
-        row_ind = index1d // n_cols
-        col_ind = index1d % n_cols
-        self.data_matrix[row_ind, col_ind] = database
+        database += [0] * (n_rows * n_cols - len(database))  # So the database size = n_rows * n_cols
+        self.data_matrix = np.array(database).reshape(n_rows, n_cols)
         self.lwe_mat = np.random.randint(0, 2**32, [n_cols, Params.secret_dimension], dtype=np.uint32)
 
     def get_scale_factor(self):
         return (2 ** 32) // self.plain_modulus
 
-    def setup(self):
+    def generate_hint(self):
         """
         Send the client hint to the client
         :return:
@@ -66,7 +63,7 @@ class PIRClient:
 if __name__ == '__main__':
     database = np.random.randint(0, 1000, [1000 * 1000], dtype=np.uint32)
     pir_server = PIRServer(database)
-    pir_client = PIRClient(pir_server.lwe_mat, pir_server.setup(), pir_server.get_scale_factor(), pir_server.plain_modulus)
+    pir_client = PIRClient(pir_server.lwe_mat, pir_server.generate_hint(), pir_server.get_scale_factor(), pir_server.plain_modulus)
 
     index = 123456
     q = pir_client.query(index)
