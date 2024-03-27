@@ -15,3 +15,11 @@ def generate_attention_mask(input_seq_len: int, current_total_len: int):
     attention_mask = np.tril(np.ones([1, 1, current_total_len, current_total_len]))
     attention_mask[:, :, :, :input_seq_len] = 1
     return torch.tensor(attention_mask) < 0.5
+
+
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """
+    [x1, x2, x3, x4, x5, x6] -> [x4, x5, x6, x1, x2, x3]
+    """
+    x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
+    return torch.cat((-x2, x1), dim=-1) 
