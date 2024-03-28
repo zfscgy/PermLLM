@@ -9,10 +9,10 @@ from torch import nn
 import torch.nn.functional as F
 from functools import partial
 
-from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock, SelfAttention, attention_fn
-from splitLLM.common.utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed
-from splitLLM.glm6b.configs import GLM6BConfig
-from splitLLM.glm6b.utils import get_rotary_embedding, rotate_half
+from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock, RotaryEmbedding, SelfAttention, attention_fn
+from split_llm.common.utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed
+from split_llm.glm6b.configs import GLM6BConfig
+from split_llm.glm6b.utils import get_rotary_embedding, rotate_half
 
 
 class GLMPositionalEmbedding_Raw(nn.Module):
@@ -147,70 +147,91 @@ def attention_fn_raw(
     return context
 
 
-
-
-
-class WrappedGLMBlock(nn.Module):
-    def __init__(self, layer_id: int):
-        super(WrappedGLMBlock, self).__init__()
-        self.model_dim = GLM6BConfig.model_dim
+class Attention(nn.Module):
+    def __init__(self, model_dim: int, n_heads: int, layer_id: int):
+        self.model_dim = model_dim
+        self.n_heads = n_heads
         self.layer_id = layer_id
-        self.num_attention_heads = GLM6BConfig.n_attention_heads
 
-        self.attn_linear = nn.Linear(self.model_dim, self.model_dim, bias=True)
-        self.post_attention_affine = nn.Linear(self.model_dim, self.model_dim, bias=True)
-        self.mlp_linear1 = nn.Linear(self.model_dim, self.model_dim * 4)
-        self.mlp_linear2 = nn.Linear(self.model_dim * 4, self.model_dim)
+        self.qkv_weight = nn.Parameter(torch.zeros(model_dim, 3 * model_dim, dtype=torch.float))
+        self.qkv_bias = nn.Parameter(torch.zeros(3 * model_dim, dtype=torch.float))
+        
+        self.attn_out_weight = nn.Parameter(torch.zeros(model_dim, model_dim, type=torch.float))
+        self.attn_out_bias = nn.Parameter(torch.zeros(model_dim, model_dim, dtype=torch.float))
 
-    def wrap(self, original_glm_block: GLMBlock):
-        # Clone all the weights
-        self.attn_linear.weight.data = original_glm_block.attention.dense.weight.data.clone()
-        self.attn_linear.bias.data = original_glm_block.attention.dense.bias.data.clone()
+        self.positional_embedding = GLMPositionalEmbedding_Raw(model_dim // n_heads)
 
-        self.post_attention_affine.weight.data = torch.diag(quantize(original_glm_block.post_attention_layernorm.weight.data, GLM6BConfig.n_attention_heads))
-        self.post_attention_affine.bias.data = original_glm_block.post_attention_layernorm.bias.data.clone()
-
-        self.mlp_linear1.weight.data = original_glm_block.mlp.dense_h_to_4h.weight.data.clone()
-        self.mlp_linear1.bias.data = original_glm_block.mlp.dense_h_to_4h.bias.data.clone()
-        self.mlp_linear2.weight.data = original_glm_block.mlp.dense_4h_to_h.weight.data.clone()
-        self.mlp_linear2.bias.data = original_glm_block.mlp.dense_4h_to_h.bias.data.clone()
-
-
-
-    def forward(self, qkv: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-                attention_mask: torch.Tensor,
-                attn_out_residual: torch.Tensor):
+    def generate_logit_scores(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         """
-        All the params are received from a previous node.
-        :param qkv:
-        :param attention_mask:
-        :param attn_out_residual:
-        :return:
+        q: [query_len, batch, n_heads, head_dim]
+        k: [key_len, batch, n_heads, head_dim]
+        k can contain different key vectors, so the first dimension could be different than q
         """
-        q, k, v = qkv
-        attention_context = self.attention_fn(q, k, v, attention_mask, self.model_dim, layer_id=self.layer_id)
-        # [seq_len, batch, hidden_size]
+        q = q[:, None]  # [q_len, 1, batch, n_heads, head_dim]
+        k = k[None, :]  # [1, k_len, batch, n_heads, head_dim]
 
-        residual_coef = (2 * 28) ** 0.5
+        logits = torch.sum(q * k, dim=-1)  # [q_len, k_len, batch, n_heads]
+        return logits
 
-        attention_output = self.attn_linear(attention_context) + residual_coef * attn_out_residual
-        attention_output_normalized = F.layer_norm(attention_output, [self.model_dim])
-        affine_output = self.post_attention_affine(attention_output_normalized)
-        # [seq_len, batch, hidden_size]
+    def generate_softmax_scores(self, logit_scores: torch.Tensor, dim: int=1) -> torch.Tensor:
+        """
+        It seems that attention_mask is useless during the inference!
+        """
+        return F.softmax(logit_scores)
+    
+    def generate_weighted_values(self, softmax_scores: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+        """
+        softmax_scores: [q_len, k_len, batch, n_heads]
+        v: [k_len, batch, n_heads, head_dim]
+        """
+        q_len, k_len, batch, n_heads = softmax_scores.shape
+        softmax_scores = softmax_scores[:, :, :, :, None]
+        v = v[None, :, :, :, :]
+        weighted_v = torch.sum(softmax_scores * v, dim=1)  # [q_len, batch, n_heads, head_sim]
+        weighted_v = weighted_v.view(q_len, batch, -1)  # [q_len, batch, model_dim]
+        return weighted_v
 
-        mlp_hidden = self.mlp_linear1(affine_output)
-        mlp_hidden_activated = F.gelu(mlp_hidden)
-        mlp_output = self.mlp_linear2(mlp_hidden_activated) + residual_coef * affine_output
-        # [seq_len, batch, hidden_size]
+    def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
+        q, k, v = (x @ self.qkv_weight + self.qkv_bias).chunk(3, dim=-1)
+        q, k = self.positional_embedding(q, k, position_ids)
+        logit_scores = self.generate_logit_scores(q, k)
+        softmax_scores = self.generate_softmax_scores(logit_scores)
+        weighted_v = self.generate_weighted_values(softmax_scores, v)
 
-        normalized_output = F.layer_norm(mlp_output, [self.model_dim])
+        attn_out = (weighted_v @ self.attn_out_bias + self.attn_out_bias)
+        return attn_out
 
-        return normalized_output
+
+class FeedForward(nn.Module):
+    def __init__(self, model_dim: int, n_heads: int, layer_id: int):
+        self.model_dim = model_dim
+        self.n_heads = n_heads
+        self.layer_id = layer_id
+
+        self.layernorm_in = nn.LayerNorm([model_dim])
+        self.mlp_dense_in = nn.Linear(model_dim, 4 * model_dim)
+        self.mlp_dense_out = nn.Linear(4 * model_dim, model_dim)
+        self.layernorm_out = nn.LayerNorm([model_dim])
+
+        self.residual_coef = (2 * 28) ** 0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h0 = self.layernorm_in(x)
+        h1 = self.mlp_dense_in(h0)
+        h2 = F.gelu(h1)
+        h3 = self.mlp_dense_out(h2)
+        h4 = h3 + self.residual_coef * h1
+        h5 = self.layernorm_out(h4)
+        return h5
 
 
-def copy_module(source_module: nn.Module, target_module: nn.Module):
-    for p_source, p_target in zip(source_module.parameters(), target_module.parameters()):
-        p_target.data = p_source.data.clone()
+def copy_attantion():
+    pass
+
+
+def copy_feedforward():
+    pass
+
 
 
 class GLMBlockInputTransform(nn.Module):
