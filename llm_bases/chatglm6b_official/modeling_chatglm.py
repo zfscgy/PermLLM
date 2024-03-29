@@ -455,7 +455,6 @@ class SelfAttention(torch.nn.Module):
 
         # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
         (query_layer, key_layer, value_layer) = self.split_tensor_along_last_dim(mixed_raw_layer, 3)
-
         if self.position_encoding_2d:
             ## ================
             # perm = np.random.permutation(self.hidden_size_per_attention_head)
@@ -488,6 +487,10 @@ class SelfAttention(torch.nn.Module):
             # [seq_len, batch, num_attention_heads, hidden_size_per_attention_head]
             query_layer, key_layer = apply_rotary_pos_emb_index(query_layer, key_layer, cos, sin, position_ids)
 
+        # print("Q:", query_layer)
+        # print("K:", key_layer)
+        # print("V:", value_layer)
+
         # [seq_len, batch, hidden_size]
         context_layer, present, attention_probs = attention_fn(
             self=self,
@@ -500,6 +503,8 @@ class SelfAttention(torch.nn.Module):
             layer_past=layer_past,
             use_cache=use_cache
         )
+
+        print("Attention out:", context_layer, context_layer.shape)
 
         output = self.dense(context_layer)
 

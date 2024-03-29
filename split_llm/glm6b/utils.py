@@ -19,7 +19,13 @@ def generate_attention_mask(input_seq_len: int, current_total_len: int):
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
-    [x1, x2, x3, x4, x5, x6] -> [x4, x5, x6, x1, x2, x3]
+    [x1, x2, x3, x4, x5, x6] -> [-x4, -x5, -x6, x1, x2, x3]
     """
     x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1) 
+
+
+def gelu_openai(x):
+    """OpenAI's gelu implementation."""
+    return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * x *
+                                       (1.0 + 0.044715 * x * x)))

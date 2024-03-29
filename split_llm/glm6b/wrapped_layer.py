@@ -12,7 +12,7 @@ from functools import partial
 from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock, RotaryEmbedding, SelfAttention, attention_fn
 from split_llm.common.utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed, copy_param
 from split_llm.glm6b.configs import GLM6BConfig
-from split_llm.glm6b.utils import rotate_half
+from split_llm.glm6b.utils import rotate_half, gelu_openai
 
 
 class GLMPositionalEmbedding_Raw(nn.Module):
@@ -182,7 +182,7 @@ class Attention_GLM_Wrapped(nn.Module):
         logit_scores: [q_len, k_len, batch, n_heads]
         It seems that attention_mask is useless during the inference!
         """
-        return F.softmax(logit_scores, dim)
+        return F.softmax(logit_scores, dim)  # [q_len, k_len, batch, n_heads]
     
     def generate_weighted_values(self, softmax_scores: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -190,21 +190,26 @@ class Attention_GLM_Wrapped(nn.Module):
         v: [k_len, batch, n_heads, head_dim]
         """
         q_len, k_len, batch, n_heads = softmax_scores.shape
-        softmax_scores = softmax_scores[:, :, :, :, None]
-        v = v[None, :, :, :, :]
+        softmax_scores = softmax_scores[:, :, :, :, None]  # [q_len, k_len, batch, n_heads, 1       ]
+        v = v[None, :, :, :, :]                           #  [1,     k_len, batch, n_heads, head_sim]
         weighted_v = torch.sum(softmax_scores * v, dim=1)  # [q_len, batch, n_heads, head_sim]
-        weighted_v = weighted_v.view(q_len, batch, -1)  # [q_len, batch, model_dim]
+        weighted_v = weighted_v.reshape(q_len, batch, -1)  # [q_len, batch, model_dim]
         return weighted_v
 
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        q, k, v = (x @ self.qkv_weight.T + self.qkv_bias).chunk(3, dim=-1)
-        q, k, v = map(lambda x: x.view(*x.shape[:2], self.n_heads, self.model_dim // self.n_heads), [q, k, v])
-        q, k = self.positional_embedding(q, k, position_ids)
-        logit_scores = self.generate_logit_scores(q, k)
-        softmax_scores = self.generate_softmax_scores(logit_scores)
-        weighted_v = self.generate_weighted_values(softmax_scores, v)
+        qkv = (x @ self.qkv_weight.T + self.qkv_bias).view(*x.shape[:2], self.n_heads, 3 * self.model_dim // self.n_heads)
+        # Notice the order here: first divide into multiple heads, then each head is split into q, k, v
 
-        attn_out = (weighted_v @ self.attn_out_weight.T + self.attn_out_bias)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q, k = self.positional_embedding(q, k, position_ids)
+        # print("Q:", q)
+        # print("K:", k)
+        # print("V:", v)
+        logit_scores = self.generate_logit_scores(q, k)
+        softmax_scores = self.generate_softmax_scores(logit_scores)  # [q_len, ]
+        weighted_v = self.generate_weighted_values(softmax_scores, v)
+        print("Attnetion_out:", weighted_v)
+        attn_out = weighted_v @ self.attn_out_weight.T + self.attn_out_bias
         return attn_out
 
 
@@ -226,6 +231,8 @@ class FeedForward_GLM_Wrapped(nn.Module):
         h0 = self.layernorm_in(x)
         h1 = self.mlp_dense_in(h0)
         h2 = F.gelu(h1)
+        #  h2 = gelu_openai(h1)
+        #  Those two gelu implementations do not have significant difference
         h3 = self.mlp_dense_out(h2)
         h4 = h3 + self.residual_coef * h0
         h5 = self.layernorm_out(h4)
@@ -239,10 +246,9 @@ def copy_attantion(glm_block: GLMBlock, attn_layer: Attention_GLM_Wrapped):
     copy_param(glm_block.attention.dense.bias, attn_layer.attn_out_bias)
 
 
-
 def copy_feedforward(glm_block: GLMBlock, next_glm_block: GLMBlock, feed_forward: FeedForward_GLM_Wrapped):
     copy_param(glm_block.post_attention_layernorm.weight, feed_forward.layernorm_in.weight)
-    copy_param(glm_block.post_attention_layernorm.bias, feed_forward.layernorm_out.bias)
+    copy_param(glm_block.post_attention_layernorm.bias, feed_forward.layernorm_in.bias)
     copy_param(glm_block.mlp.dense_h_to_4h.weight, feed_forward.mlp_dense_in.weight)
     copy_param(glm_block.mlp.dense_h_to_4h.bias, feed_forward.mlp_dense_in.bias)
     copy_param(glm_block.mlp.dense_4h_to_h.weight, feed_forward.mlp_dense_out.weight)
