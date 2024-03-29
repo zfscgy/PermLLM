@@ -1,4 +1,5 @@
-.vscode
+.vscode/
 __pycache__/
-splitLLM/saved_model
-tmp
+/saved_data
+.ipynb_checkpoints/
+tmp/

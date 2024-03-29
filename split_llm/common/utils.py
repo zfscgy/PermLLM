@@ -1,6 +1,7 @@
 from typing import Union, Tuple, Collection
 import numpy as np
 import torch
+from torch import nn
 
 
 def inverse_permutation(perm: Union[np.ndarray, torch.Tensor], device: str="cpu") -> torch.Tensor:
@@ -47,33 +48,8 @@ def random_vec_with_seed(seed, size: Union[int, Collection[int]], range: Tuple[i
     return random_vec
 
 
-def shard(xs: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    xs: [..., dim]
-    Shard a vector, so that it can be represented by a linear combination of multiple shards
-    """
-    scale = xs.abs().max()
-
-    
-    trans = []
-    vecss = []
-    for kk in [k // 2, k - k // 2]:
-        shape = (*xs.shape[:-1], kk-1, xs.shape[-1])
-        extended_xs = torch.cat([xs.view(*xs.shape[:-1], 1, xs.shape[-1]), 
-                                 2 * scale * torch.rand(shape, dtype=xs.dtype, device=xs.device) - scale], dim=-2)
-        inv_transformation = 10 * torch.rand((*xs.shape[:-1], kk, kk), dtype=xs.dtype, device=xs.device) - 5
-        rand_vecs = torch.matmul(torch.linalg.inv(inv_transformation), extended_xs)  # batched matarix multiplication
-        trans.append(inv_transformation[..., 0, :])
-        vecss.append(rand_vecs)
-    return torch.cat(vecss, dim=-2), torch.cat(trans, dim=-1)
-
-
-def reconstruct_random_linear_combination(linear_combinations: torch.Tensor, inverse_transformation: torch.Tensor) -> torch.Tensor:
-    """
-    linear_combinations: [batch, n_random_vectors, dim]
-    """
-    reconstructed_vecs = torch.bmm(inverse_transformation[:, 0, :], linear_combinations)  # batched matarix multiplication
-    return reconstructed_vecs
+def copy_param(param_from: nn.Parameter, param_to: nn.Parameter):
+    param_to.data = param_from.data.detach().clone()
 
 
 if __name__ == "__main__":
@@ -81,11 +57,4 @@ if __name__ == "__main__":
         m = random_orthonormal(4096)
         print(m @ m.T)
 
-    def test_shard():
-        xs = torch.tensor([[8964., 1926, 817, 1, 2, 3, 4, 5], [1, 2, 3, 4, 5, 8964, 817, 1926]])
-        shards, coefs = shard(xs, 10)
-        reconstructed = coefs @ shards
-        print(reconstructed)
-
     # test_random_orthonormal()
-    test_shard()
