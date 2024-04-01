@@ -1,4 +1,5 @@
 from typing import Any, Tuple, List
+import types
 
 import torch
 import numpy as np
@@ -31,7 +32,23 @@ def estimate_size(m):
     
 
 
-class SimulatedCommunication:
+class Communication:
+    def __init__(self, roles: List[str]):
+        raise NotImplementedError()
+
+    def send(self, from_role: str, to_role: str, message: Any, header: str):
+        raise NotImplementedError()
+
+
+    def fetch(self, to_role: str, from_role: str, header: str):
+        raise NotImplementedError()
+
+    def generate_report(self, latency: float, bandwidth: float):
+        raise NotImplementedError()
+
+
+
+class SimulatedCommunication(Communication):
     def __init__(self, roles: List[str]):
         self.comm_history: List[List[dict]] = []
         self.roles = roles
@@ -44,16 +61,18 @@ class SimulatedCommunication:
         self.stage_names.append(name)
         self.comm_history.append([])
 
-    def send(self, from_role: str, to_role: str, message: Any, header: str, stage: int = None, end_stage: int = None):
+    def send(self, from_role: str, to_role: str, message: Any, header: str):
         msg_size = estimate_size(message)
-        self.communication_buffer[header] = message
+        self.communication_buffer[f"{from_role}-{to_role}-{header}"] = message
         self.comm_history[self.current_stage].append({
             "from": from_role,
             "to": to_role,
             "header": header,
-            "size": msg_size,
-            "end": end_stage
+            "size": msg_size
         })
+    
+    def fetch(self, to_role: str, from_role: str, header: str):
+        return self.communication_buffer.pop(f"{from_role}-{to_role}-{header}")
 
     def generate_report(self, latency: float, bandwidth: float):
         """
@@ -62,4 +81,22 @@ class SimulatedCommunication:
         comms = [0 for _ in range(self.current_stage)]
         times = [0 for _ in range(self.current_stage)]
         for s in range(self.current_stage):
-            pass
+            for history in self.comm_history[s]:
+                comms[s] += history['size']
+                times[s] += latency + history['size'] / bandwidth
+        
+        return comms, times
+
+
+class Node:
+    def __init__(self, communication: Communication, name: str) -> None:
+        self.comm = communication
+        self.name = name
+        self.space = types.SimpleNamespace()
+
+    def send(self, to: str, header: str, message: Any):
+        self.comm.send(self.name, to, message, header)
+    
+    def fetch(self, from_role: str, header: str):
+        return self.comm.fetch(self.name, from_role, header)
+    

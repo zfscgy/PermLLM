@@ -258,3 +258,29 @@ def copy_feedforward(glm_block: GLMBlock, next_glm_block: GLMBlock, feed_forward
         copy_param(next_glm_block.input_layernorm.bias, feed_forward.layernorm_out.bias)
     else:
         feed_forward.layernorm_out = nn.Identity()  # No layernorm at the last transformer!
+
+
+
+def share_attention(attn_raw: Attention_GLM_Wrapped, uniform_scale: float):
+    attn_share_0 = Attention_GLM_Wrapped(attn_raw.model_dim, attn_raw.n_heads, attn_raw.layer_id)
+    attn_share_1 = Attention_GLM_Wrapped(attn_raw.model_dim, attn_raw.n_heads, attn_raw.layer_id)
+    
+    qkv_w_0 = torch.rand_like(attn_raw.qkv_weight) * uniform_scale - uniform_scale / 2
+    qkv_b_0 = torch.rand_like(attn_raw.qkv_bias) * uniform_scale - uniform_scale / 2
+
+    dense_w_0 = torch.rand_like(attn_raw.attn_out_weight) * uniform_scale - uniform_scale / 2
+    dense_b_0 = torch.rand_like(attn_raw.attn_out_bias) * uniform_scale - uniform_scale / 2
+
+    attn_share_0.qkv_weight = qkv_w_0
+    attn_share_0.qkv_bias = qkv_b_0
+    attn_share_0.attn_out_weight.data = dense_w_0
+    attn_share_0.attn_out_bias.data = dense_b_0
+
+    
+    attn_share_1.qkv_weight = attn_share_0.qkv_weight - qkv_w_0
+    attn_share_1.qkv_bias = attn_share_0.qkv_bias - qkv_b_0
+    attn_share_1.attn_out_weight.data = attn_share_0.attn_out_weight.data - dense_w_0
+    attn_share_1.attn_out_bias.data = attn_share_0.attn_out_bias.data - dense_b_0
+
+    return attn_share_0, attn_share_1
+
