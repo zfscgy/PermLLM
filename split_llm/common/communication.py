@@ -93,10 +93,14 @@ class Node:
         self.comm = communication
         self.name = name
         self.space = types.SimpleNamespace()
+        self.storage = dict()
 
     def send(self, to: str, header: str, message: Any):
         self.comm.send(self.name, to, message, header)
     
     def fetch(self, from_role: str, header: str):
         return self.comm.fetch(self.name, from_role, header)
+    
+    def fetch_and_store(self, from_role: str, header: str):
+        self.storage[header] = self.fetch(from_role, header)
     
