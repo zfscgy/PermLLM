@@ -20,7 +20,7 @@ def estimate_size(m):
         elif m.dtype == torch.half:
             return np.prod(m.shape) * 2
         elif m.dtype in [torch.int, torch.long]:
-            bit_length = torch.ceil(torch.log2(np.max(m) - torch.min(m))).item()
+            bit_length = torch.ceil(torch.log2(torch.max(m) - torch.min(m))).item()
             return np.prod(m.shape) * bit_length / 4
         else:
             raise ValueError("Unsupported Torch type for size estimation")
