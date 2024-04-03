@@ -103,4 +103,15 @@ class Node:
     
     def fetch_and_store(self, from_role: str, header: str):
         self.storage[header] = self.fetch(from_role, header)
+
+    def fetch_and_enqueue(self, from_role: str, header: str):
+        if header not in self.storage:
+            self.storage[header] = []
+        self.storage[header].insert(0, self.fetch(from_role, header))
+
+    def enqueue(self, header: str, obj: Any):
+        if header not in self.storage:
+            self.storage[header] = []
+        self.storage[header].insert(0, obj)
+
     

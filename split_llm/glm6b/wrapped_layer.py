@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from functools import partial
 
 from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock, RotaryEmbedding, SelfAttention, attention_fn
-from split_llm.common.utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed, copy_param
+from split_llm.common.torch_utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed, copy_param
 from split_llm.glm6b.configs import GLM6BConfig
 from split_llm.glm6b.utils import rotate_half, gelu_openai
 
