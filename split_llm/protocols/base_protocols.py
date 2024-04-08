@@ -5,15 +5,17 @@ import torch
 from split_llm.common.communication import Communication, Node, SimulatedCommunication
 from split_llm.common.utils import test_func
 
+from split_llm.protocols.base import Protocol
 
-class SS_Mul__CX_N0_Y_N1:
+
+class SS_Mul__CX_N0_Y_N1(Protocol):
     def __init__(self, x_shape, f_mul: Callable, 
                  name: str, 
                  node_0: Node, node_1: Node, node_2: Node,
                  mask_scale: float, device: str="cpu") -> None:
         """
-        X is constant in node_0 (name:x)
-        Y is not constant in node_1 (name:y)
+        X is constant in node_0 
+        Y is not constant in node_1
         """
         self.x_shape = x_shape
         self.f_mul = f_mul
@@ -26,7 +28,8 @@ class SS_Mul__CX_N0_Y_N1:
 
     def prepare(self):
         """
-        We assume that X is constant and is obtained by node_0
+        Input:
+            Node 0: X
         """
         
         # In node_2
@@ -79,6 +82,10 @@ class SS_Mul__CX_N0_Y_N1:
 
 
     def online_execute(self):
+        """
+        Input:
+            Node 1: y
+        """
         # In node_1
         y_sub_v = self.node_1.storage[f"{self.name}:y"] - self.node_1.storage[f"{self.name}:beaver_v"].pop()
         self.node_1.send(self.node_0.name, f"{self.name}:y-v", y_sub_v)
@@ -91,19 +98,20 @@ class SS_Mul__CX_N0_Y_N1:
         self.node_0.storage[f"{self.name}:z0"] = z0
 
 
-    def clear_cache(self):
-        del self.node_1.storage[f"{self.name}:y"]
+    def clear_io(self):
+        del self.node_0.storage[f"{self.name}:z0"]
+        del self.node_0.storage[f"{self.name}:z1"], self.node_1.storage[f"{self.name}:y"]
 
 
 
-class SS_Mul__CX_N0:
+class SS_Mul__CX_N0(Protocol):
     def __init__(self, x_shape, f_mul: Callable, 
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
                 mask_scale: float, device: str="cpu") -> None:
         """
-        X is constant in node_0 (name:x)
-        Y is not constant in node_1 (name:y)
+        X is constant in Node 0
+        Y is shared
         """
         self.x_shape = x_shape
         self.f_mul = f_mul
@@ -122,6 +130,10 @@ class SS_Mul__CX_N0:
         )
 
     def prepare(self):
+        """
+        Input:
+            Node 0: x
+        """
         self.node_0.storage[f"{self.sub_protocol.name}:x"] = self.node_0.storage[f"{self.name}:x"]
         del self.node_0.storage[f"{self.name}:x"]
         self.sub_protocol.prepare()
@@ -130,6 +142,11 @@ class SS_Mul__CX_N0:
         self.sub_protocol.offline_execute(y_shape, z_shape)
     
     def online_execute(self):
+        """
+        Input:
+            Node 0: y0
+            Node 1: y1
+        """
         # In node_1
         self.node_1.storage[f"{self.sub_protocol.name}:y"] = self.node_1.storage[f"{self.name}:y1"]
         del self.node_1.storage[f"{self.name}:y1"]
@@ -142,21 +159,19 @@ class SS_Mul__CX_N0:
         self.node_1.storage[f"{self.name}:z1"] = self.node_1.storage[f"{self.sub_protocol.name}:z1"]
 
 
-    def clear_cache(self):
+    def clear_io(self):
         del self.node_0.storage[f"{self.name}:y0"]
         del self.node_0.storage[f"{self.sub_protocol.name}:z0"], self.node_1.storage[f"{self.sub_protocol.name}:z1"]
         self.sub_protocol.clear_cache()
 
 
-class SS_Perm:
+class SS_Perm(Protocol):
     def __init__(self, x_shape, f_perm: Callable, 
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
                 mask_scale: float, device: str="cpu") -> None:
         """
-        Node 0 holds name:x0, name:perm (this is a tensor representing the permutation)
-        Node 1 holds name:x1
-
+        To permute (or any operations that will modify the position of elements) a shared tensor
         The algorithm here used is permute + share
         See https://eprint.iacr.org/2019/1340.pdf for details
         """
@@ -174,7 +189,8 @@ class SS_Perm:
 
     def offline_execute(self):
         """
-        The random permutation for shuffling is pre-computed by node_0 and is provided with the :perm key.
+        Input:
+            Node 0: new_perm
         """
 
         # In node_0
@@ -198,9 +214,11 @@ class SS_Perm:
 
     def online_execute(self):
         """
-        Output:
-        Node 0 holds z0
-        Node 1 holds z1
+        Input:
+            Node 0: x0
+        Output: x1
+            Node 0: z0
+            Node 1: z1
         """
         # In node_1
         mask_a, mask_b = self.node_1.storage[f"{self.name}:mask_a&b"].pop()
@@ -214,9 +232,9 @@ class SS_Perm:
               self.f_perm(self.node_0.fetch(self.node_1.name, f"{self.name}:x1-mask_a"), self.node_0.storage[f"{self.name}:perm"])
 
     
-    def clear_cache(self):
-        del self.node_0.storage[f"{self.name}:x0"]
-        del self.node_1.storage[f"{self.name}:x1"]
+    def clear_io(self):
+        del self.node_0.storage[f"{self.name}:x0"], self.node_0.storage[f"{self.name}:z0"]
+        del self.node_1.storage[f"{self.name}:x1"], self.node_1.storage[f"{self.name}:z1"]
 
 
 
