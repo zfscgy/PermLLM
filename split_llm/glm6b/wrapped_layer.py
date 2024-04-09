@@ -9,9 +9,8 @@ from torch import nn
 import torch.nn.functional as F
 from functools import partial
 
-from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock, RotaryEmbedding, SelfAttention, attention_fn
-from split_llm.common.torch_utils import random_orthonormal, inverse_permutation, quantize, random_vec_with_seed, copy_param
-from split_llm.glm6b.configs import GLM6BConfig
+from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock
+from split_llm.common.torch_utils import copy_param
 from split_llm.glm6b.utils import rotate_half, gelu_openai
 
 
@@ -151,7 +150,7 @@ class FeedForward_GLM_Wrapped(nn.Module):
         return h5
 
 
-def copy_attantion(glm_block: GLMBlock, attn_layer: Attention_GLM_Wrapped):
+def copy_attention(glm_block: GLMBlock, attn_layer: Attention_GLM_Wrapped):
     copy_param(glm_block.attention.query_key_value.weight, attn_layer.qkv_weight)
     copy_param(glm_block.attention.query_key_value.bias, attn_layer.qkv_bias)
     copy_param(glm_block.attention.dense.weight, attn_layer.attn_out_weight)

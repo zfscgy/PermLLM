@@ -6,7 +6,9 @@ import numpy as np
 
 
 def estimate_size(m):
-    if isinstance(m, np.ndarray):
+    if isinstance(m, float) or isinstance(m, int):
+        return 4
+    elif isinstance(m, np.ndarray):
         if m.dtype == np.float32:
             return m.size * 4
         elif m.dtype in [np.int32, np.int64, np.uint32, np.uint64]:
@@ -14,7 +16,7 @@ def estimate_size(m):
             return m.size * bit_length / 4
         else:
             raise ValueError("Unsupported NumPy type for size estimation")
-    if isinstance(m, torch.Tensor):
+    elif isinstance(m, torch.Tensor):
         if m.dtype == torch.float:
             return np.prod(m.shape) * 4
         elif m.dtype == torch.half:
@@ -24,7 +26,6 @@ def estimate_size(m):
             return np.prod(m.shape) * bit_length / 4
         else:
             raise ValueError("Unsupported Torch type for size estimation")
-
     elif isinstance(m, list) or isinstance(m, tuple):
         return sum([estimate_size(mm) for mm in m])
     else:

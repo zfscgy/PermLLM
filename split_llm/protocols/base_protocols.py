@@ -166,7 +166,7 @@ class SS_Mul__CX_N0(Protocol):
 
 
 class SS_Perm(Protocol):
-    def __init__(self, x_shape, f_perm: Callable, 
+    def __init__(self, f_perm: Callable, 
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
                 mask_scale: float, device: str="cpu") -> None:
@@ -175,7 +175,6 @@ class SS_Perm(Protocol):
         The algorithm here used is permute + share
         See https://eprint.iacr.org/2019/1340.pdf for details
         """
-        self.x_shape = x_shape
         self.f_perm = f_perm
         self.name = name
         self.node_0 = node_0
@@ -187,7 +186,7 @@ class SS_Perm(Protocol):
     def prepare(self):
         pass
 
-    def offline_execute(self):
+    def offline_execute(self, x_shape):
         """
         Input:
             Node 0: new_perm
@@ -199,8 +198,8 @@ class SS_Perm(Protocol):
 
         # In node_2
         perm = self.node_2.fetch(self.node_0.name, f"{self.name}:new_perm")
-        mask_a = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - self.mask_scale / 2
-        mask_b = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - self.mask_scale / 2
+        mask_a = torch.rand(*x_shape, device=self.device) * self.mask_scale - self.mask_scale / 2
+        mask_b = torch.rand(*x_shape, device=self.device) * self.mask_scale - self.mask_scale / 2
         perm_diff = self.f_perm(mask_a, perm) - mask_b
         
         self.node_2.send(self.node_0.name, f"{self.name}:perm_diff", perm_diff)

@@ -5,8 +5,10 @@ import torch
 from split_llm.common.communication import Communication, Node, SimulatedCommunication
 from split_llm.common.utils import test_func
 
+from split_llm.protocols.base import Protocol
 
-class SS_Mul__AppendingX:
+
+class SS_Mul__AppendingX(Protocol):
     def __init__(self, x_shape, appending_dim: int, f_mul: Callable,
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
@@ -54,7 +56,7 @@ class SS_Mul__AppendingX:
         append_size: the size of the tensor appendded to x (in appending_dim)
         """
         self.appended_size_offline += append_size
-        u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, self.appended_size_offline))
+        u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, self.appended_size_offline, device=self.device))
 
         v0 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
         v1 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale

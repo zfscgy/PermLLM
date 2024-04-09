@@ -10,14 +10,13 @@ from split_llm.common.utils import test_func
 
 
 class SS_ElementWise__RandPerm(Protocol):
-    def __init__(self, x_shape, f_perm: Callable, f_invperm: Callable, f_elemwise: Callable,
+    def __init__(self, f_perm: Callable, f_invperm: Callable, f_elemwise: Callable,
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
                 mask_scale: float, device: str="cpu") -> None:
         """
         f_perm(x, perm)
         """
-        self.x_shape = x_shape
         self.f_perm = f_perm
         self.f_invperm = f_invperm
         self.f_elemwise = f_elemwise
@@ -30,17 +29,17 @@ class SS_ElementWise__RandPerm(Protocol):
 
 
         self.perm_name = f"{self.name}/perm"
-        self.perm_protocol = SS_Perm(x_shape, f_perm, self.perm_name, node_0, node_1, node_2, mask_scale, device)
+        self.perm_protocol = SS_Perm(f_perm, self.perm_name, node_0, node_1, node_2, mask_scale, device)
 
         self.invperm_name = f"{self.name}/invperm"
-        self.invperm_protocol = SS_Perm(x_shape, f_perm, self.invperm_name, node_0, node_1, node_2, mask_scale, device)
+        self.invperm_protocol = SS_Perm(f_perm, self.invperm_name, node_0, node_1, node_2, mask_scale, device)
 
     
     def prepare(self):
         self.perm_protocol.prepare()
         self.invperm_protocol.prepare()
 
-    def offline_execute(self):
+    def offline_execute(self, x_shape):
         """
         Input:
             Node 0: new_perm, new_invperm
@@ -49,8 +48,8 @@ class SS_ElementWise__RandPerm(Protocol):
         """
         self.node_0.storage[f"{self.perm_name}:new_perm"] = self.node_0.storage[f"{self.name}:new_perm"]
         self.node_0.storage[f"{self.invperm_name}:new_perm"] = self.node_0.storage[f"{self.name}:new_invperm"]
-        self.perm_protocol.offline_execute()
-        self.invperm_protocol.offline_execute()
+        self.perm_protocol.offline_execute(x_shape)
+        self.invperm_protocol.offline_execute(x_shape)
 
     def online_execute(self):
         """
@@ -115,7 +114,7 @@ if __name__ == "__main__":
 
         protocol_name = "ss_elementwise"
         protocol = SS_ElementWise__RandPerm(
-            [4], (lambda x, p: x[p]), (lambda x, p: x[p]), (lambda x: x**3),
+            (lambda x, p: x[p]), (lambda x, p: x[p]), (lambda x: x**3),
             protocol_name, n0, n1, n2, 10)
         x = torch.tensor([1, 9, 2, 6]).float()
         x0 = torch.rand_like(x) * 10 - 5
@@ -124,7 +123,7 @@ if __name__ == "__main__":
         n0.storage[f"{protocol_name}:new_invperm"] = torch.tensor([3, 2, 1, 0])
 
         protocol.prepare()
-        protocol.offline_execute()
+        protocol.offline_execute([4])
 
         n0.storage[f"{protocol_name}:x0"] = x0
         n1.storage[f"{protocol_name}:x1"] = x - x0
