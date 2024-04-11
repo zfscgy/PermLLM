@@ -32,7 +32,7 @@ class SS_ElementWise__RandPerm(Protocol):
         self.perm_protocol = SS_Perm(f_perm, self.perm_name, node_0, node_1, node_2, mask_scale, device)
 
         self.invperm_name = f"{self.name}/invperm"
-        self.invperm_protocol = SS_Perm(f_perm, self.invperm_name, node_0, node_1, node_2, mask_scale, device)
+        self.invperm_protocol = SS_Perm(f_invperm, self.invperm_name, node_0, node_1, node_2, mask_scale, device)
 
     
     def prepare(self):
@@ -79,8 +79,6 @@ class SS_ElementWise__RandPerm(Protocol):
         y_shape = permuted_y.shape
         del permuted_x, permuted_y
 
-
-
         # In node_0
         self.node_0.storage[f"{self.invperm_name}:x0"] = torch.zeros(*y_shape, device=self.device, dtype=torch.float)
 
@@ -119,8 +117,8 @@ if __name__ == "__main__":
         x = torch.tensor([1, 9, 2, 6]).float()
         x0 = torch.rand_like(x) * 10 - 5
 
-        n0.storage[f"{protocol_name}:new_perm"] = torch.tensor([3, 2, 1, 0])
-        n0.storage[f"{protocol_name}:new_invperm"] = torch.tensor([3, 2, 1, 0])
+        n0.storage[f"{protocol_name}:new_perm"] = torch.tensor([2, 3, 1, 0])
+        n0.storage[f"{protocol_name}:new_invperm"] = torch.tensor([3, 2, 0, 1])
 
         protocol.prepare()
         protocol.offline_execute([4])

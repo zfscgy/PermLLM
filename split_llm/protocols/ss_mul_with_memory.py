@@ -99,7 +99,7 @@ class SS_Mul__AppendingX(Protocol):
         # In node_0
         x0_sub_u0_appended = self.node_0.storage[f"{self.name}:x0 appended"] - \
             torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, 
-                         torch.arange(self.appended_size_online - appended_size, self.appended_size_online))
+                         torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
         y0_sub_v0 = self.node_0.storage[f"{self.name}:y0"] - self.node_0.storage[f"{self.name}:beaver_v0"][-1]
             
         self.node_0.storage[f"{self.name}:x0-u0 appended"] = x0_sub_u0_appended
@@ -114,7 +114,7 @@ class SS_Mul__AppendingX(Protocol):
 
         x1_sub_u1_appended = self.node_1.storage[f"{self.name}:x1 appended"] - \
             torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, 
-                         torch.arange(self.appended_size_online - appended_size, self.appended_size_online))
+                         torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
         y1_sub_v1 = self.node_1.storage[f"{self.name}:y1"] - self.node_1.storage[f"{self.name}:beaver_v1"][-1]
 
         self.node_1.storage[f"{self.name}:y1-v1"] = y1_sub_v1
@@ -132,7 +132,7 @@ class SS_Mul__AppendingX(Protocol):
                 dim=self.appending_dim)
         y_sub_v = self.node_1.fetch(self.node_0.name, f"{self.name}:y0-v0") + self.node_1.storage[f"{self.name}:y1-v1"]
 
-        u1 = torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, torch.arange(self.appended_size_online))
+        u1 = torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
         self.node_1.storage[f"{self.name}:z1"] = \
               self.f_mul(u1, y_sub_v) + \
               self.f_mul(self.node_1.storage[f"{self.name}:x-u"], self.node_1.storage[f"{self.name}:beaver_v1"].pop()) + \
@@ -150,7 +150,7 @@ class SS_Mul__AppendingX(Protocol):
                 dim=self.appending_dim)
         y_sub_v = self.node_0.storage[f"{self.name}:y0-v0"] + self.node_0.fetch(self.node_1.name, f"{self.name}:y1-v1")
 
-        u0 = torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, torch.arange(self.appended_size_online))
+        u0 = torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
         self.node_0.storage[f"{self.name}:z0"] = \
               self.f_mul(self.node_0.storage[f"{self.name}:x-u"], y_sub_v) + \
               self.f_mul(u0, y_sub_v) + \

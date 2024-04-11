@@ -14,13 +14,13 @@ from split_llm.common.torch_utils import copy_param
 from split_llm.glm6b.utils import rotate_half, gelu_openai
 
 
-class GLMPositionalEmbedding_Raw(nn.Module):
+class GLMPositionalEmbedding(nn.Module):
     def __init__(self, dim: int) -> None:
         """
         dim: dimension of the each head's embedding
         """
-        super(GLMPositionalEmbedding_Raw, self).__init__()
-        self.inv_freq = nn.Parameter(1. / (10000 ** (torch.arange(0, dim, 2).half() / dim)), requires_grad=False)
+        super(GLMPositionalEmbedding, self).__init__()
+        self.inv_freq = nn.Parameter(1. / (10000 ** (torch.arange(0, dim, 2).float() / dim)), requires_grad=False)
         # [dim]
 
     def get_rotary_embedding(self, seq_len: int):
@@ -72,7 +72,7 @@ class Attention_GLM_Wrapped(nn.Module):
         self.attn_out_weight = nn.Parameter(torch.zeros(model_dim, model_dim, dtype=torch.float))
         self.attn_out_bias = nn.Parameter(torch.zeros(model_dim, model_dim, dtype=torch.float))
 
-        self.positional_embedding = GLMPositionalEmbedding_Raw(model_dim // (2 * n_heads))
+        self.positional_embedding = GLMPositionalEmbedding(model_dim // (2 * n_heads))
 
     def generate_logit_scores(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         """

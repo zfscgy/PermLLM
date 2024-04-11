@@ -32,24 +32,3 @@ def gelu_openai(x):
     """OpenAI's gelu implementation."""
     return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * x *
                                        (1.0 + 0.044715 * x * x)))
-
-
-def permute_attention_scores_with_seed(scores: torch.Tensor, seed: int, reverse: bool = False):
-    """
-    scores: [q_len * n_heads * batch, k_len]
-    """
-    n_lists, k_len = scores.shape
-    rand_g = torch.Generator()
-    rand_g.manual_seed(seed)
-    
-    perm_list_level = torch.randperm(n_lists, generator=rand_g)
-    if reverse:
-        perm_list_level = inverse_permutation(perm_list_level)
-
-    permuted_list = scores[perm_list_level]
-
-    inlist_perms = torch.stack([torch.randperm(k_len, device=scores.device) for _ in range(scores.shape[0])])
-    if reverse:
-        inlist_perms = inverse_permutation(inlist_perms)
-    permuted_scores = permuted_list.gather(1, inlist_perms)
-    return permuted_scores

@@ -100,7 +100,7 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
 
     def clear_io(self):
         del self.node_0.storage[f"{self.name}:z0"]
-        del self.node_0.storage[f"{self.name}:z1"], self.node_1.storage[f"{self.name}:y"]
+        del self.node_1.storage[f"{self.name}:z1"], self.node_1.storage[f"{self.name}:y"]
 
 
 
@@ -160,10 +160,9 @@ class SS_Mul__CX_N0(Protocol):
 
 
     def clear_io(self):
-        del self.node_0.storage[f"{self.name}:y0"]
-        del self.node_0.storage[f"{self.sub_protocol.name}:z0"], self.node_1.storage[f"{self.sub_protocol.name}:z1"]
-        self.sub_protocol.clear_cache()
-
+        self.sub_protocol.clear_io()
+        del self.node_0.storage[f"{self.name}:y0"], self.node_0.storage[f"{self.name}:z0"]
+        del self.node_1.storage[f"{self.name}:z1"]
 
 class SS_Perm(Protocol):
     def __init__(self, f_perm: Callable, 
@@ -225,10 +224,11 @@ class SS_Perm(Protocol):
         self.node_1.send(self.node_0.name, f"{self.name}:x1-mask_a", self.node_1.storage[f"{self.name}:x1"] - mask_a)
 
         # In node_0
+        perm = self.node_0.storage[f"{self.name}:perm"].pop()
         self.node_0.storage[f"{self.name}:z0"] = \
-              self.f_perm(self.node_0.storage[f"{self.name}:x0"], self.node_0.storage[f"{self.name}:perm"]) + \
+              self.f_perm(self.node_0.storage[f"{self.name}:x0"], perm) + \
               self.node_0.storage[f"{self.name}:perm_diff"].pop() + \
-              self.f_perm(self.node_0.fetch(self.node_1.name, f"{self.name}:x1-mask_a"), self.node_0.storage[f"{self.name}:perm"])
+              self.f_perm(self.node_0.fetch(self.node_1.name, f"{self.name}:x1-mask_a"), perm)
 
     
     def clear_io(self):
@@ -257,7 +257,7 @@ if __name__ == "__main__":
         protocol.prepare()
         protocol.offline_execute([2, 1], [1, 1])
         protocol.online_execute()
-        protocol.clear_cache()
+
 
         print(n0.storage)
         print(n1.storage)
@@ -265,6 +265,7 @@ if __name__ == "__main__":
         print(n0.storage[f"{protocol_name}:z0"])
         print(n1.storage[f"{protocol_name}:z1"])
 
+        protocol.clear_io()
 
     @test_func
     def test__SS_Mul__CX_N0():
@@ -284,13 +285,14 @@ if __name__ == "__main__":
         protocol.prepare()
         protocol.offline_execute([2, 1], [1, 1])
         protocol.online_execute()
-        protocol.clear_cache()
 
         print(n0.storage)
         print(n1.storage)
         print("-------------")
         print(n0.storage[f"{protocol_name}:z0"])
         print(n1.storage[f"{protocol_name}:z1"])
+
+        protocol.clear_io()
 
     @test_func
     def test__SS_Perm():
@@ -308,17 +310,18 @@ if __name__ == "__main__":
 
         f_perm = lambda x, perm: x[perm]
 
-        protocol = SS_Perm([3], f_perm, protocol_name, n0, n1, n2, 10)
+        protocol = SS_Perm(f_perm, protocol_name, n0, n1, n2, 10)
         protocol.prepare()
-        protocol.offline_execute()
+        protocol.offline_execute([3])
         protocol.online_execute()
-        protocol.clear_cache()
 
         print(n0.storage)
         print(n1.storage)
         print("-------------")
         print(n0.storage[f"{protocol_name}:z0"])
         print(n1.storage[f"{protocol_name}:z1"])
+
+        protocol.clear_io()
 
 
     test__SS_Mul__CX_N0_Y_N1()
