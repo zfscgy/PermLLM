@@ -4,7 +4,9 @@ from functools import partial
 import numpy as np
 
 import torch
+from torch import nn
 import torch.nn.functional as F
+
 
 from split_llm.common.communication import Node
 from split_llm.protocols.base import Protocol
@@ -249,6 +251,16 @@ class GLMAttentionProtocol(Protocol):
         self.attn_out_protocol.clear_io()
 
     def online_execute(self):
+        """
+        Input: [q_len, 1, 4096]
+            Node 0: x0
+            Node 1: x1
+
+        Output: [q_len, 1, 4096]
+            Node 0: z0
+            Node 1: z1
+        """
+
         self.online_step_qkv()
         self.online_step_dot_product()
         self.online_step_softmax()
@@ -322,19 +334,19 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.layernorm_in_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.layernorm_in_name}:new_invperm"] = perm_key
-        self.layernorm_in_protocol.offline_execute([next_length, 1, 4096])
+        self.layernorm_in_protocol.offline_execute([next_length, 4096])
         
 
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.gelu_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.gelu_name}:new_invperm"] = perm_key
-        self.gelu_protocol.offline_execute([next_length, 1, 4096])
+        self.gelu_protocol.offline_execute([next_length, 4 * 4096])
         
 
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.layernorm_out_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.layernorm_out_name}:new_invperm"] = perm_key
-        self.layernorm_out_protocol.offline_execute([next_length, 1, 4096])
+        self.layernorm_out_protocol.offline_execute([next_length, 4096])
 
 
     def online_step_layernorm_in(self):
@@ -357,8 +369,7 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
             self.n0.space.ffs[self.layer].layernorm_in.bias
 
         self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.layernorm_in_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_in.weight + \
-            self.n1.space.ffs[self.layer].layernorm_in.bias
+            self.n1.storage[f"{self.layernorm_in_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_in.weight
 
         self.layernorm_in_protocol.clear_io()
 
@@ -372,11 +383,11 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
             Node 1: h1
         """
         self.n0.storage[f"{self.name}:h0"] = \
-            self.n0.storage[f"{self.layernorm_in_name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_in.weight.T + \
+            self.n0.storage[f"{self.name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_in.weight.T + \
             self.n0.space.ffs[self.layer].mlp_dense_in.bias
+
         self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.layernorm_in_name}:h1"] * self.n1.space.ffs[self.layer].mlp_dense_in.weight.T + \
-            self.n1.space.ffs[self.layer].mlp_dense_in.bias
+            self.n1.storage[f"{self.name}:h1"] @ self.n1.space.ffs[self.layer].mlp_dense_in.weight.T
         
     def online_step_gelu(self):
         """
@@ -390,7 +401,7 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
         self.n0.storage[f"{self.gelu_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
         self.n1.storage[f"{self.gelu_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
 
-        self.layernorm_in_protocol.online_execute()
+        self.gelu_protocol.online_execute()
 
         self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.gelu_name}:z0"]
         self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.gelu_name}:z1"]
@@ -405,11 +416,11 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
             Node 1: h1
         """
         self.n0.storage[f"{self.name}:h0"] = \
-            self.n0.storage[f"{self.layernorm_in_name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_out.weight.T + \
+            self.n0.storage[f"{self.name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_out.weight.T + \
             self.n0.space.ffs[self.layer].mlp_dense_out.bias
+
         self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.layernorm_in_name}:h1"] * self.n1.space.ffs[self.layer].mlp_dense_out.weight.T + \
-            self.n1.space.ffs[self.layer].mlp_dense_out.bias
+            self.n1.storage[f"{self.name}:h1"] @ self.n1.space.ffs[self.layer].mlp_dense_out.weight.T
         
     def online_step_layernorm_out(self):
         """
@@ -425,14 +436,14 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
 
         self.layernorm_out_protocol.online_execute()
 
+        if not isinstance(self.n0.space.ffs[self.layer].layernorm_out, nn.Identity):
+            self.n0.storage[f"{self.name}:h0"] = \
+                self.n0.storage[f"{self.layernorm_out_name}:z0"] * self.n0.space.ffs[self.layer].layernorm_out.weight + \
+                self.n0.space.ffs[self.layer].layernorm_out.bias
 
-        self.n0.storage[f"{self.name}:h0"] = \
-            self.n0.storage[f"{self.layernorm_out_name}:z0"] * self.n0.space.ffs[self.layer].layernorm_out.weight + \
-            self.n0.space.ffs[self.layer].layernorm_out.bias
-
-        self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.layernorm_out_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_out.weight + \
-            self.n1.space.ffs[self.layer].layernorm_out.bias
+        if not isinstance(self.n1.space.ffs[self.layer].layernorm_out, nn.Identity):
+            self.n1.storage[f"{self.name}:h1"] = \
+                self.n1.storage[f"{self.layernorm_out_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_out.weight
 
         self.layernorm_out_protocol.clear_io()
 
@@ -456,18 +467,18 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
         
         self.n1.storage[f"{self.name}:h_in_1"] = self.n1.storage[f"{self.name}:h1"]
 
+
         self.online_step_mlp_in()
         self.online_step_gelu()
         self.online_step_mlp_out()
 
 
-        self.n0.storage[f"{self.name}:h0"] += self.n0.storage[f"{self.name}:h_in_0"] 
+        self.n0.storage[f"{self.name}:h0"] += (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:h_in_0"] 
         
-        self.n1.storage[f"{self.name}:h1"] += self.n1.storage[f"{self.name}:h_in_1"]
+        self.n1.storage[f"{self.name}:h1"] += (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:h_in_1"]
 
         self.online_step_layernorm_out()
 
         self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.name}:h0"].view(-1, 1, 4096)
         
         self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.name}:h1"].view(-1, 1, 4096)
-

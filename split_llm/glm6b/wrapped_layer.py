@@ -119,7 +119,6 @@ class Attention_GLM_Wrapped(nn.Module):
         logit_scores = self.generate_logit_scores(q, k)
         softmax_scores = self.generate_softmax_scores(logit_scores)  # [q_len, ]
         weighted_v = self.generate_weighted_values(softmax_scores, v)
-        print("Attnetion_out:", weighted_v)
         attn_out = weighted_v @ self.attn_out_weight.T + self.attn_out_bias
         return attn_out
 

@@ -504,8 +504,6 @@ class SelfAttention(torch.nn.Module):
             use_cache=use_cache
         )
 
-        print("Attention out:", context_layer, context_layer.shape)
-
         output = self.dense(context_layer)
 
         outputs = (output, present)
