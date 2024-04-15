@@ -16,16 +16,32 @@ from split_llm.protocols.element_wise import SS_ElementWise__RandPerm
 from split_llm.glm6b.wrapped_layer import Attention_GLM_Wrapped, GLMPositionalEmbedding, FeedForward_GLM_Wrapped
 from split_llm.glm6b.utils import generate_position_ids
 
-from split_llm.common.torch_utils import permute_2d_with_seed
+from split_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
 
 
-def setup_node(node: Node, attention_layers: List[Attention_GLM_Wrapped], ff_layers: List[FeedForward_GLM_Wrapped]):
+from homomorphic_encryption.bfv import BFV
+
+
+class GLMConfig:
+    model_dim = 4096
+    n_heads = 32
+    head_dim = 128
+    n_tokens = 130006
+
+
+def setup_node(node: Node, 
+               attention_layers: List[Attention_GLM_Wrapped], 
+               ff_layers: List[FeedForward_GLM_Wrapped],
+               word_embedding: nn.Embedding,
+               lm_head_layer: nn.Linear):
     node.space.attentions = attention_layers
     node.space.ffs = ff_layers
+    node.space.word_embedding = word_embedding
+    node.space.final_dense = lm_head_layer
 
 
-class GLMAttentionProtocol(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, device: str = "cpu"):
+class GLM_AttentionProtocol(Protocol):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -43,22 +59,22 @@ class GLMAttentionProtocol(Protocol):
 
         self.device = device
 
-        self.name = f"Attn_Layer_{layer}"
+        self.name = name or f"Attn_Layer_{layer}"
 
-        self.qkv_mul_name = f"Attn_{layer}/qkv_matmul"
-        self.dot_product_name = f"Attn_{layer}/dot_product"
-        self.softmax_name = f"Attn_{layer}/softmax"
-        self.weighted_sum_name = f"Attn_{layer}/weighted_sum"
-        self.attn_out_name = f"Attn_{layer}/attn_out"
+        self.qkv_mul_name = f"{self.name}/qkv_matmul"
+        self.dot_product_name = f"{self.name}/dot_product"
+        self.softmax_name = f"{self.name}/softmax"
+        self.weighted_sum_name = f"{self.name}/weighted_sum"
+        self.attn_out_name = f"{self.name}/attn_out"
 
         self.qkv_mul_protocol = SS_Mul__CX_N0(
-            [4096, 4096 * 3], 
+            [GLMConfig.model_dim, GLMConfig.model_dim * 3], 
             (lambda w, x: x @ w), self.qkv_mul_name,
             n0, n1, n2,
             mask_scale, device)
         
         self.dot_product_protocol = SS_Mul__AppendingX(
-            [self.max_generation_length, 1, 32, 128], 0, 
+            [self.max_generation_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 0, 
             (lambda k, q: self.n0.space.attentions[self.layer].generate_logit_scores(q, k)),
             self.dot_product_name, 
             n0, n1, n2,
@@ -73,7 +89,7 @@ class GLMAttentionProtocol(Protocol):
         )
 
         self.weighted_sum_protocol = SS_Mul__AppendingX(
-            [self.max_generation_length, 1, 32, 128], 0,
+            [self.max_generation_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 0,
             (lambda v, score: self.n0.space.attentions[self.layer].generate_weighted_values(score, v)),
             self.weighted_sum_name,
             n0, n1, n2,
@@ -81,7 +97,7 @@ class GLMAttentionProtocol(Protocol):
         )
 
         self.attn_out_protocol = SS_Mul__CX_N0(
-            [4096, 4096], (lambda w, x: x @ w), self.attn_out_name,
+            [GLMConfig.model_dim, GLMConfig.model_dim], (lambda w, x: x @ w), self.attn_out_name,
             n0, n1, n2,
             mask_scale, device
         )
@@ -106,23 +122,23 @@ class GLMAttentionProtocol(Protocol):
             self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length).to(self.device))
         self.current_length = next_length
 
-        self.qkv_mul_protocol.offline_execute([next_length, 1, 4096], [next_length, 1, 4096 * 3])
-        self.dot_product_protocol.offline_execute([next_length, 1, 32, 128], [next_length, self.total_length, 1, 32], next_length)
+        self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
+        self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], [next_length, self.total_length, 1, GLMConfig.n_heads], next_length)
 
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.softmax_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.softmax_name}:new_invperm"] = perm_key
-        self.softmax_protocol.offline_execute([next_length * 32 * 1, self.total_length])
-        self.weighted_sum_protocol.offline_execute([next_length, self.total_length, 1, 32], [next_length, 1, 4096], next_length)
-        self.attn_out_protocol.offline_execute([next_length, 1, 4096], [next_length, 1, 4096])
+        self.softmax_protocol.offline_execute([next_length * GLMConfig.n_heads * 1, self.total_length])
+        self.weighted_sum_protocol.offline_execute([next_length, self.total_length, 1, GLMConfig.n_heads], [next_length, 1, GLMConfig.model_dim], next_length)
+        self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim])
 
     def online_step_qkv(self):
         """
-        Input: [q_len, 1, 4096]
+        Input: [q_len, 1, model_dim]
             Node 0: x0
             Node 1: x1
 
-        Output: [q_len, 1, 4096 * 3]
+        Output: [q_len, 1, model_dim * 3]
             Node 0: h0
             Node 1: h1
         """
@@ -138,11 +154,11 @@ class GLMAttentionProtocol(Protocol):
     
     def online_step_dot_product(self):
         """
-        Input: [q_len, 1, 4096 * 3]
+        Input: [q_len, 1, model_dim * 3]
             Node 0: h0
             Node 1: h1
 
-        Output: [q_len, k_len, 1, 32]
+        Output: [q_len, k_len, 1, n_heads]
             Node 0: s0
             Node 1: s1
         """
@@ -150,7 +166,7 @@ class GLMAttentionProtocol(Protocol):
         
         # In node_0
         self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], self.n0.storage[f"{self.name}:v0"] = \
-            self.n0.storage[f"{self.name}:h0"].view(-1, 1, 32, 128 * 3).chunk(3, dim=-1)
+            self.n0.storage[f"{self.name}:h0"].view(-1, 1, GLMConfig.n_heads, GLMConfig.head_dim * 3).chunk(3, dim=-1)
 
         self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"] = self.positional_embedding(
             self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], position_ids
@@ -161,7 +177,7 @@ class GLMAttentionProtocol(Protocol):
 
         # In node_1
         self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], self.n1.storage[f"{self.name}:v1"] = \
-            self.n1.storage[f"{self.name}:h1"].view(-1, 1, 32, 128 * 3).chunk(3, dim=-1)
+            self.n1.storage[f"{self.name}:h1"].view(-1, 1, GLMConfig.n_heads, GLMConfig.head_dim * 3).chunk(3, dim=-1)
         
         self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"] = self.positional_embedding(
             self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], position_ids
@@ -182,10 +198,10 @@ class GLMAttentionProtocol(Protocol):
 
     def online_step_softmax(self):
         """
-        Input: [q_len, k_len, 1, 32]
+        Input: [q_len, k_len, 1, n_heads]
             Node 0: s0
             Node 1: s1
-        Output: [q_len, k_len, 1, 32]
+        Output: [q_len, k_len, 1, n_heads]
             Node 0: s0
             Node 1: s1
         """
@@ -198,20 +214,20 @@ class GLMAttentionProtocol(Protocol):
 
         # In node_0
         self.n0.storage[f"{self.name}:s0"] = \
-            self.n0.storage[f"{self.softmax_name}:z0"].view(self.current_length, 32, 1, self.total_length).swapaxes(1, 3)
+            self.n0.storage[f"{self.softmax_name}:z0"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
         # In node_1
         self.n1.storage[f"{self.name}:s1"] = \
-            self.n1.storage[f"{self.softmax_name}:z1"].view(self.current_length, 32, 1, self.total_length).swapaxes(1, 3)
+            self.n1.storage[f"{self.softmax_name}:z1"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
         
         self.softmax_protocol.clear_io()
 
 
     def online_step_weighted_v(self):
         """
-        Input: [q_len, k_len, 1, 32]
+        Input: [q_len, k_len, 1, n_heads]
             Node 0: s0, v0
             Node 1: s1, v1
-        Output: [q_len, k_len, 1, 32]
+        Output: [q_len, k_len, 1, n_heads]
             Node 0: h0
             Node 1: h1
         """
@@ -232,11 +248,11 @@ class GLMAttentionProtocol(Protocol):
 
     def online_step_attn_out(self):
         """
-        Input: [q_len, 1, 4096]
+        Input: [q_len, 1, model_dim]
             Node 0: h0
             Node 1: h1
 
-        Output: [q_len, 1, 4096]
+        Output: [q_len, 1, model_dim]
             Node 0: h0
             Node 1: h1
         """
@@ -252,11 +268,11 @@ class GLMAttentionProtocol(Protocol):
 
     def online_execute(self):
         """
-        Input: [q_len, 1, 4096]
+        Input: [q_len, 1, model_dim]
             Node 0: x0
             Node 1: x1
 
-        Output: [q_len, 1, 4096]
+        Output: [q_len, 1, .model_dim]
             Node 0: z0
             Node 1: z1
         """
@@ -280,8 +296,8 @@ class GLMAttentionProtocol(Protocol):
 
 
 
-class GLMFeedForwardProtocol_PlainWeights(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, device: str = "cpu"):
+class GLM_FeedForwardProtocol_PlainWeights(Protocol):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -293,7 +309,7 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
 
         self.device = device
 
-        self.name = f"FF_Layer_{layer}"
+        self.name = name or f"FF_Layer_{layer}"
 
         self.current_length = None
 
@@ -304,13 +320,13 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
 
         self.layernorm_in_protocol = SS_ElementWise__RandPerm(
             permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
-            partial(F.layer_norm, normalized_shape=[4096]), self.layernorm_in_name,
+            partial(F.layer_norm, normalized_shape=[GLMConfig.model_dim]), self.layernorm_in_name,
             n0, n1, n2,
             mask_scale, device
         )
 
         self.gelu_protocol = SS_ElementWise__RandPerm(
-            permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
+            permute_with_seed, partial(permute_with_seed, reverse=True),
             F.gelu, self.gelu_name,
             n0, n1, n2,
             mask_scale, device
@@ -318,7 +334,7 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
 
         self.layernorm_out_protocol = SS_ElementWise__RandPerm(
             permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
-            partial(F.layer_norm, normalized_shape=[4096]), self.layernorm_out_name,
+            partial(F.layer_norm, normalized_shape=[GLMConfig.model_dim]), self.layernorm_out_name,
             n0, n1, n2,
             mask_scale, device
         )
@@ -334,19 +350,19 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.layernorm_in_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.layernorm_in_name}:new_invperm"] = perm_key
-        self.layernorm_in_protocol.offline_execute([next_length, 4096])
+        self.layernorm_in_protocol.offline_execute([next_length, GLMConfig.model_dim])
         
 
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.gelu_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.gelu_name}:new_invperm"] = perm_key
-        self.gelu_protocol.offline_execute([next_length, 4 * 4096])
+        self.gelu_protocol.offline_execute([next_length, 4 * GLMConfig.model_dim])
         
 
         perm_key = np.random.randint(2 ** 30)
         self.n0.storage[f"{self.layernorm_out_name}:new_perm"] = perm_key
         self.n0.storage[f"{self.layernorm_out_name}:new_invperm"] = perm_key
-        self.layernorm_out_protocol.offline_execute([next_length, 4096])
+        self.layernorm_out_protocol.offline_execute([next_length, GLMConfig.model_dim])
 
 
     def online_step_layernorm_in(self):
@@ -457,9 +473,9 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
             Node 1: z1
         """
         
-        self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.name}:x0"].view(-1, 4096)
+        self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.name}:x0"].view(-1, GLMConfig.model_dim)
         
-        self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.name}:x1"].view(-1, 4096)
+        self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.name}:x1"].view(-1, GLMConfig.model_dim)
 
         self.online_step_layernorm_in()
 
@@ -479,6 +495,136 @@ class GLMFeedForwardProtocol_PlainWeights(Protocol):
 
         self.online_step_layernorm_out()
 
-        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.name}:h0"].view(-1, 1, 4096)
+        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.name}:h0"].view(-1, 1, GLMConfig.model_dim)
         
-        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.name}:h1"].view(-1, 1, 4096)
+        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.name}:h1"].view(-1, 1, GLMConfig.model_dim)
+
+
+class GLM_TransformerLayerProtocol(Protocol):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+        self.n0 = n0
+        self.n1 = n1
+        self.n2 = n2
+        self.layer = layer
+    
+
+        self.max_generation_length = max_generation_length
+        self.mask_scale = mask_scale
+
+        self.device = device
+
+        self.name = f"GLM__Transformer_{layer}"
+
+        self.current_length = None
+
+        self.attn_name = f"{self.name}/attn"
+        self.ff_name = f"{self.name}/ff"
+
+        self.attn_protocol = GLM_AttentionProtocol(n0, n1, n2, layer, mask_scale, max_generation_length, self.attn_name, device)
+        self.ff_protocol = GLM_FeedForwardProtocol_PlainWeights(n0, n1, n2, layer, mask_scale, max_generation_length, self.ff_name, device)
+
+    def prepare(self):
+        self.attn_protocol.prepare()
+        self.ff_protocol.prepare()
+
+    def offline_execute(self):
+        self.attn_protocol.offline_execute()
+        self.ff_protocol.offline_execute()
+    
+    def online_execute(self):
+        """
+        Input:
+            Node 0: x0
+            Node 1: x1
+        Output:
+            Node 0: z0
+            Node 1: z1
+        """
+        self.n0.storage[f"{self.attn_name}:x0"] = self.n0.storage[f"{self.name}:x0"]
+        self.n1.storage[f"{self.attn_name}:x1"] = self.n1.storage[f"{self.name}:x1"]
+        
+        self.attn_protocol.online_execute()
+
+        self.n0.storage[f"{self.ff_name}:x0"] = self.n0.storage[f"{self.attn_name}:x0"] + (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:x0"]
+        self.n1.storage[f"{self.ff_name}:x1"] = self.n1.storage[f"{self.attn_name}:x1"] + (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:x1"]
+        
+        self.ff_protocol.online_execute()
+
+        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.ff_name}:z0"]
+        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.ff_name}:z1"]
+        
+        self.attn_protocol.clear_io()
+        self.ff_protocol.clear_io()
+
+
+class GLM_PredictionProtocol(Protocol):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+        self.n0 = n0
+        self.n1 = n1
+        self.n2 = n2
+        self.layer = layer
+    
+
+        self.max_generation_length = max_generation_length
+        self.mask_scale = mask_scale
+
+        self.device = device
+
+        self.name = f"GLM__PredictionLayer"
+
+        self.current_length = None
+
+        self.prediction_dense_name = f"{self.name}/final_dense"
+        self.randperm_name = f"{self.name}/score_permutation"
+
+        self.prediction_dense_protocol = SS_Mul__CX_N0(
+            [GLMConfig.n_tokens, GLMConfig.model_dim], torch.matmul, self.prediction_dense_name,
+            n0, n1, n2, mask_scale, device
+        )
+
+        self.randperm_protocol = SS_Perm(
+            permute_with_seed, self.randperm_name, n0, n1, n2, mask_scale, device
+        )
+
+    def prepare(self):
+        last_dense: nn.Linear = self.n0.space.final_dense
+        self.n0.storage[f"{self.prediction_dense_name}:x"] = last_dense.weight[:GLMConfig.n_tokens].T
+
+        self.prediction_dense_protocol.prepare()
+        self.randperm_protocol.prepare()
+
+    def offline_execute(self):
+        self.prediction_dense_protocol.offline_execute([GLMConfig.model_dim], [GLMConfig.n_tokens])
+        perm_key = np.random.randint(2 ** 30)
+        self.n0.storage[f"{self.randperm_protocol}:new_perm"] = perm_key
+        self.randperm_protocol.offline_execute([GLMConfig.n_tokens])
+    
+    def online_execute(self):
+        """
+        Input:
+            Node 0: x0
+            Node 1: x1
+        """
+        self.n0.storage[f"{self.prediction_dense_name}:x0"] = self.n0.storage[f"{self.name}:x0"]
+        self.n1.storage[f"{self.prediction_dense_name}:x1"] = self.n1.storage[f"{self.name}:x1"]
+        self.prediction_dense_protocol.online_execute()
+        
+        last_dense: nn.Linear = self.n0.space.final_dense
+        self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:x0"] + last_dense.bias
+        self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:x1"]
+        self.randperm_protocol.online_execute()
+
+        self.n0.send(self.n1.name, f"{self.randperm_name}:permuted_s0", self.n0.storage[f"{self.randperm_name}:z0"])
+
+        # In node_1
+        permuted_scores = self.n0.storage[f"{self.randperm_name}:z1"] + \
+            self.n1.fetch(self.n0.name, f"{self.randperm_name}:permuted_s0")
+
+        # Using the greedy generation
+        best_idx = np.argmax(permuted_scores.tolist())
+        indicator = np.zeros([GLMConfig.n_tokens], dtype=np.int)
+        indicator[best_idx] = 1
+
+        bfv_cryptosystem = BFV()
+        bfv_cryptosystem.enc_vector(indicator)
+        

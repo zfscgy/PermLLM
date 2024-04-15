@@ -36,27 +36,37 @@ def relative_error(x: torch.Tensor, ref: torch.Tensor):
     return (torch.sqrt(torch.mean(torch.square(x - ref))) / torch.std(ref)).item()
 
 
-def permute_2d_with_seed(scores: torch.Tensor, seed: int, reverse: bool = False):
+def permute_with_seed(xs: torch.Tensor, seed: int, reverse: bool = True):
+    raw_shape = xs.shape
+    xs = xs.view(-1)
+    rand_g = torch.Generator(device=xs.device).manual_seed(seed)
+    permutation = torch.randperm(len(xs), generator=rand_g, device=xs.device)
+    if reverse:
+        permutation = inverse_permutation(permutation)
+
+    return xs[permutation].view(*raw_shape)
+
+
+def permute_2d_with_seed(xs: torch.Tensor, seed: int, reverse: bool = False):
     """
     scores: [q_len * n_heads * batch, k_len]
     """
-    n_lists, k_len = scores.shape
-    rand_g = torch.Generator(device=scores.device)
-    rand_g.manual_seed(seed)
+    n_lists, k_len = xs.shape
+    rand_g = torch.Generator(device=xs.device).manual_seed(seed)
     
-    perm_list_level = torch.randperm(n_lists, generator=rand_g, device=scores.device)
+    perm_list_level = torch.randperm(n_lists, generator=rand_g, device=xs.device)
     if reverse:
         perm_list_level = inverse_permutation(perm_list_level)
-    inlist_perms = torch.stack([torch.randperm(k_len, generator=rand_g, device=scores.device) for _ in range(scores.shape[0])])
+    inlist_perms = torch.stack([torch.randperm(k_len, generator=rand_g, device=xs.device) for _ in range(xs.shape[0])])
     if reverse:
         inlist_perms = inverse_permutation(inlist_perms)
 
 
     if not reverse:
-        permuted_scores = scores.gather(1, inlist_perms)
+        permuted_scores = xs.gather(1, inlist_perms)
         permuted_scores = permuted_scores[perm_list_level]
     else:
-        permuted_scores = scores[perm_list_level]
+        permuted_scores = xs[perm_list_level]
         permuted_scores = permuted_scores.gather(1, inlist_perms)
         
     return permuted_scores
