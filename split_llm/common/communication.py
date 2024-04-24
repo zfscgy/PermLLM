@@ -28,9 +28,12 @@ def estimate_size(m):
             raise ValueError("Unsupported Torch type for size estimation")
     elif isinstance(m, list) or isinstance(m, tuple):
         return sum([estimate_size(mm) for mm in m])
+    # Assume that there is a 'size' function in the object.
+    elif isinstance(m, bytes):
+        return len(m)
     else:
         raise ValueError("Unsupported type for size estimation")
-    
+
 
 
 class Communication:

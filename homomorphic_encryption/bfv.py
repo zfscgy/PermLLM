@@ -10,17 +10,22 @@ from split_llm.common.utils import test_func
 
 
 class BFV:
-    def __init__(self) -> None:
+    def __init__(self, context: ts.Context = None) -> None:
         """
+        BFV cryptosystem
         https://github.com/OpenMined/TenSEAL/blob/main/tutorials%2FTutorial%200%20-%20Getting%20Started.ipynb
         """
-        self.context = ts.context(
-                ts.SCHEME_TYPE.BFV,
-                poly_modulus_degree=4096, 
-                plain_modulus=1032193,
-                coeff_mod_bit_sizes=[36,36,36]
-            )
-        self.context.generate_galois_keys()
+        self.ciphertext_size = 2048
+        if context is None:
+            self.context = ts.context(
+                    ts.SCHEME_TYPE.BFV,
+                    poly_modulus_degree=4096, 
+                    plain_modulus=1032193,
+                    coeff_mod_bit_sizes=[36,36,36]
+                )
+            self.context.generate_galois_keys()
+        else:
+            self.context = context
 
     def enc_vector(self, vec: np.ndarray):
         return ts.bfv_vector(self.context, vec)
@@ -32,6 +37,17 @@ class BFV:
             return np.array(ct.decrypt())
         else:
             raise TypeError("Not a valid ciphertext.")
+    
+    def serialize(self):
+        """
+        The private key will not be serialized!
+        """
+        return self.context.serialize()
+    
+    @staticmethod
+    def from_bytes(serialized: bytes):
+        return BFV(context=ts.context_from(serialized))
+        
 
     
 if __name__ == "__main__":

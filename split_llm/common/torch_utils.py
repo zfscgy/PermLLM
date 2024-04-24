@@ -36,7 +36,7 @@ def relative_error(x: torch.Tensor, ref: torch.Tensor):
     return (torch.sqrt(torch.mean(torch.square(x - ref))) / torch.std(ref)).item()
 
 
-def permute_with_seed(xs: torch.Tensor, seed: int, reverse: bool = True):
+def permute_with_seed(xs: torch.Tensor, seed: int, reverse: bool = False):
     raw_shape = xs.shape
     xs = xs.view(-1)
     rand_g = torch.Generator(device=xs.device).manual_seed(seed)
@@ -80,6 +80,12 @@ if __name__ == "__main__":
         permutation = torch.tensor([[3, 2, 1, 0], [2, 3, 1, 0]])
         inv_perm = inverse_permutation(permutation)
         print(inv_perm)
+
+    @test_func
+    def test__permute_with_seed():
+        seed = 1998
+        xs = torch.rand([100, 100])
+        permuted_xs = permute_with_seed(xs, seed)
 
     @test_func
     def test__permute_2d():

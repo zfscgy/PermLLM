@@ -158,9 +158,9 @@ class SS_Mul__CX_N0(Protocol):
             self.f_mul(self.node_0.storage[f"{self.sub_protocol.name}:x"], self.node_0.storage[f"{self.name}:y0"])
         self.node_1.storage[f"{self.name}:z1"] = self.node_1.storage[f"{self.sub_protocol.name}:z1"]
 
+        self.sub_protocol.clear_io()
 
     def clear_io(self):
-        self.sub_protocol.clear_io()
         del self.node_0.storage[f"{self.name}:y0"], self.node_0.storage[f"{self.name}:z0"]
         del self.node_1.storage[f"{self.name}:z1"]
 
@@ -248,10 +248,13 @@ if __name__ == "__main__":
         n0 = Node(communication, "n0")
         n1 = Node(communication, "n1")
         n2 = Node(communication, "n2")
-
         protocol_name = "ss_mul__cx_n0_y_n1"
-        n0.storage[f"{protocol_name}:x"] = torch.tensor([[1, 2]]).float()
-        n1.storage[f"{protocol_name}:y"] = torch.tensor([[2], [1]]).float()
+
+        x = torch.tensor([[1, 2]]).float()
+        y = torch.tensor([[2], [1]]).float()
+
+        n0.storage[f"{protocol_name}:x"] = x
+        n1.storage[f"{protocol_name}:y"] = y
 
         protocol = SS_Mul__CX_N0_Y_N1([1, 2], torch.matmul, protocol_name, n0, n1, n2, 10)
         protocol.prepare()
@@ -259,13 +262,20 @@ if __name__ == "__main__":
         protocol.online_execute()
 
 
-        print(n0.storage)
-        print(n1.storage)
-        print("-------------")
-        print(n0.storage[f"{protocol_name}:z0"])
-        print(n1.storage[f"{protocol_name}:z1"])
 
+        print("-------------Output Expected/Executed--------------")
+        print(x @ y)
+        print(n0.storage[f"{protocol_name}:z0"] + n1.storage[f"{protocol_name}:z1"])
+
+
+        print("----------Storage----------")
+        print(n0.storage)
+        print(n1.storage)    
+        print("----------Storage (after clear IO)-----------")
         protocol.clear_io()
+        print(n0.storage)
+        print(n1.storage)    
+        
 
     @test_func
     def test__SS_Mul__CX_N0():
@@ -277,22 +287,31 @@ if __name__ == "__main__":
         n2 = Node(communication, "n2")
 
         protocol_name = "ss_mul__cx_n0"
-        n0.storage[f"{protocol_name}:x"] = torch.tensor([[1, 2]]).float()
-        n0.storage[f"{protocol_name}:y0"] = torch.tensor([[0.5], [3]]).float()
-        n1.storage[f"{protocol_name}:y1"] = torch.tensor([[1.5], [-2]]).float()
+        x = torch.tensor([[1, 2]]).float()
+        y = torch.tensor([[1], [2]]).float()
+        y0 = torch.tensor([[0.5], [3]]).float()
+        n0.storage[f"{protocol_name}:x"] = x
+        n0.storage[f"{protocol_name}:y0"] = y0
+        n1.storage[f"{protocol_name}:y1"] = y - y0
 
         protocol = SS_Mul__CX_N0([1, 2], torch.matmul, protocol_name, n0, n1, n2, 10)
         protocol.prepare()
         protocol.offline_execute([2, 1], [1, 1])
         protocol.online_execute()
 
-        print(n0.storage)
-        print(n1.storage)
-        print("-------------")
-        print(n0.storage[f"{protocol_name}:z0"])
-        print(n1.storage[f"{protocol_name}:z1"])
+        print("-------------Output Expected/Executed--------------")
+        print(x @ y)
+        print(n0.storage[f"{protocol_name}:z0"] + n1.storage[f"{protocol_name}:z1"])
 
+
+        print("----------Storage----------")
+        print(n0.storage)
+        print(n1.storage)    
+        print("----------Storage (after clear IO)-----------")
         protocol.clear_io()
+        print(n0.storage)
+        print(n1.storage)    
+
 
     @test_func
     def test__SS_Perm():
@@ -304,9 +323,12 @@ if __name__ == "__main__":
         n2 = Node(communication, "n2")
 
         protocol_name = "ss_perm"
-        n0.storage[f"{protocol_name}:x0"] = torch.tensor([1, 2, 3]).float()
-        n0.storage[f"{protocol_name}:new_perm"] = torch.tensor([2, 1, 0])
-        n1.storage[f"{protocol_name}:x1"] = torch.tensor([0, 0, 0]).float()
+        x = torch.tensor([1, 2, 3]).float()
+        x0 = torch.rand_like(x)
+        perm = torch.tensor([2, 1, 0])
+        n0.storage[f"{protocol_name}:x0"] = x0
+        n0.storage[f"{protocol_name}:new_perm"] = perm
+        n1.storage[f"{protocol_name}:x1"] = x - x0
 
         f_perm = lambda x, perm: x[perm]
 
@@ -315,13 +337,18 @@ if __name__ == "__main__":
         protocol.offline_execute([3])
         protocol.online_execute()
 
-        print(n0.storage)
-        print(n1.storage)
-        print("-------------")
-        print(n0.storage[f"{protocol_name}:z0"])
-        print(n1.storage[f"{protocol_name}:z1"])
+        print("-------------Output Expected/Executed--------------")
+        print(x[perm])
+        print(n0.storage[f"{protocol_name}:z0"] + n1.storage[f"{protocol_name}:z1"])
 
+        print("----------Storage----------")
+        print(n0.storage)
+        print(n1.storage)    
+        print("----------Storage (after clear IO)-----------")
         protocol.clear_io()
+        print(n0.storage)
+        print(n1.storage)    
+
 
 
     test__SS_Mul__CX_N0_Y_N1()

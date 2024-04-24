@@ -67,23 +67,18 @@ class SS_Mul__AppendingX(Protocol):
         w0 = torch.rand(z_shape, device=self.device) * self.mask_scale ** 2 - 0.5 * self.mask_scale ** 2
         w1 = w - w0
 
-        self.node_2.send(self.node_0.name, f"{self.name}:beaver_v0", v0)
-        self.node_2.send(self.node_1.name, f"{self.name}:beaver_v1", v1)
+        self.node_2.send(self.node_0.name, f"{self.name}:beaver_v0, w0", [v0, w0])
 
-
-        self.node_2.send(self.node_0.name, f"{self.name}:beaver_w0", w0)
-        self.node_2.send(self.node_1.name, f"{self.name}:beaver_w1", w1)
+        self.node_2.send(self.node_1.name, f"{self.name}:beaver_v1, w1", [v1, w1])
 
         del v0, v1, v, w0, w1, w
 
 
         # In node_0
-        self.node_0.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v0")
-        self.node_0.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_w0")
+        self.node_0.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v0, w0")
 
         # In node_1
-        self.node_1.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v1")
-        self.node_1.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_w1")
+        self.node_1.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v1, w1")
 
 
     def online_execute(self):
@@ -100,13 +95,12 @@ class SS_Mul__AppendingX(Protocol):
         x0_sub_u0_appended = self.node_0.storage[f"{self.name}:x0 appended"] - \
             torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, 
                          torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
-        y0_sub_v0 = self.node_0.storage[f"{self.name}:y0"] - self.node_0.storage[f"{self.name}:beaver_v0"][-1]
-            
+        y0_sub_v0 = self.node_0.storage[f"{self.name}:y0"] - self.node_0.storage[f"{self.name}:beaver_v0, w0"][-1][0]
+    
         self.node_0.storage[f"{self.name}:x0-u0 appended"] = x0_sub_u0_appended
         self.node_0.storage[f"{self.name}:y0-v0"] = y0_sub_v0
         
-        self.node_0.send(self.node_1.name, f"{self.name}:x0-u0 appended", x0_sub_u0_appended)
-        self.node_0.send(self.node_1.name, f"{self.name}:y0-v0", y0_sub_v0)
+        self.node_0.send(self.node_1.name, f"{self.name}:x0-u0 appended, y0-v0", [x0_sub_u0_appended, y0_sub_v0])
 
         del x0_sub_u0_appended, y0_sub_v0
 
@@ -115,49 +109,48 @@ class SS_Mul__AppendingX(Protocol):
         x1_sub_u1_appended = self.node_1.storage[f"{self.name}:x1 appended"] - \
             torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, 
                          torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
-        y1_sub_v1 = self.node_1.storage[f"{self.name}:y1"] - self.node_1.storage[f"{self.name}:beaver_v1"][-1]
+        y1_sub_v1 = self.node_1.storage[f"{self.name}:y1"] - self.node_1.storage[f"{self.name}:beaver_v1, w1"][-1][0]
 
         self.node_1.storage[f"{self.name}:y1-v1"] = y1_sub_v1
 
-        self.node_1.send(self.node_0.name, f"{self.name}:x1-u1 appended", x1_sub_u1_appended)
-        self.node_1.send(self.node_0.name, f"{self.name}:y1-v1", y1_sub_v1)
+        self.node_1.send(self.node_0.name, f"{self.name}:x1-u1 appended, y1-v1", [x1_sub_u1_appended, y1_sub_v1])
 
 
+        x0_sub_u0_appended, y0_sub_v0 = self.node_1.fetch(self.node_0.name, f"{self.name}:x0-u0 appended, y0-v0")
         if f"{self.name}:x-u" not in self.node_0.storage:
-            self.node_1.storage[f"{self.name}:x-u"] = x1_sub_u1_appended + self.node_1.fetch(self.node_0.name, f"{self.name}:x0-u0 appended")
+            self.node_1.storage[f"{self.name}:x-u"] = x1_sub_u1_appended + x0_sub_u0_appended
         else:
             self.node_1.storage[f"{self.name}:x-u"] = torch.cat([
                 self.node_1.storage[f"{self.name}:x-u"], 
-                x1_sub_u1_appended + self.node_1.fetch(self.node_0.name, f"{self.name}:x0-u0 appended")], 
+                x1_sub_u1_appended + x0_sub_u0_appended], 
                 dim=self.appending_dim)
-        y_sub_v = self.node_1.fetch(self.node_0.name, f"{self.name}:y0-v0") + self.node_1.storage[f"{self.name}:y1-v1"]
+        y_sub_v = y0_sub_v0 + self.node_1.storage[f"{self.name}:y1-v1"]
 
         u1 = torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
-        self.node_1.storage[f"{self.name}:z1"] = \
-              self.f_mul(u1, y_sub_v) + \
-              self.f_mul(self.node_1.storage[f"{self.name}:x-u"], self.node_1.storage[f"{self.name}:beaver_v1"].pop()) + \
-              self.node_1.storage[f"{self.name}:beaver_w1"].pop()
-        del x1_sub_u1_appended, y1_sub_v1, y_sub_v
+        v1, w1 = self.node_1.storage[f"{self.name}:beaver_v1, w1"].pop()
+        self.node_1.storage[f"{self.name}:z1"] = self.f_mul(u1, y_sub_v) + self.f_mul(self.node_1.storage[f"{self.name}:x-u"], v1) + w1
+        del x1_sub_u1_appended, y1_sub_v1, x0_sub_u0_appended, y0_sub_v0, y_sub_v, u1, v1, w1
 
         # In node_0
+        x1_sub_u1_appended, y1_sub_v1 = self.node_0.fetch(self.node_1.name, f"{self.name}:x1-u1 appended, y1-v1")
         if f"{self.name}:x-u" not in self.node_0.storage:
             self.node_0.storage[f"{self.name}:x-u"] = \
-                self.node_0.storage[f"{self.name}:x0-u0 appended"] + self.node_0.fetch(self.node_1.name, f"{self.name}:x1-u1 appended")
+                self.node_0.storage[f"{self.name}:x0-u0 appended"] + x1_sub_u1_appended
         else:
             self.node_0.storage[f"{self.name}:x-u"] = torch.cat([
                 self.node_0.storage[f"{self.name}:x-u"], 
-                self.node_0.storage[f"{self.name}:x0-u0 appended"] + self.node_0.fetch(self.node_1.name, f"{self.name}:x1-u1 appended")], 
+                self.node_0.storage[f"{self.name}:x0-u0 appended"] + x1_sub_u1_appended], 
                 dim=self.appending_dim)
-        y_sub_v = self.node_0.storage[f"{self.name}:y0-v0"] + self.node_0.fetch(self.node_1.name, f"{self.name}:y1-v1")
+        
+        y_sub_v = self.node_0.storage[f"{self.name}:y0-v0"] + y1_sub_v1
 
         u0 = torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
+        v0, w0 = self.node_0.storage[f"{self.name}:beaver_v0, w0"].pop()
         self.node_0.storage[f"{self.name}:z0"] = \
               self.f_mul(self.node_0.storage[f"{self.name}:x-u"], y_sub_v) + \
-              self.f_mul(u0, y_sub_v) + \
-              self.f_mul(self.node_0.storage[f"{self.name}:x-u"], self.node_0.storage[f"{self.name}:beaver_v0"].pop()) + \
-              self.node_0.storage[f"{self.name}:beaver_w0"].pop()
+              self.f_mul(u0, y_sub_v) + self.f_mul(self.node_0.storage[f"{self.name}:x-u"], v0) + w0
 
-        del y_sub_v, self.node_0.storage[f"{self.name}:x0-u0 appended"]
+        del x1_sub_u1_appended, y_sub_v, u0, v0, w0, self.node_0.storage[f"{self.name}:x0-u0 appended"]
 
 
         # Clear cache
@@ -165,8 +158,8 @@ class SS_Mul__AppendingX(Protocol):
         del self.node_1.storage[f"{self.name}:y1-v1"]
 
     def clear_io(self):
-        del self.node_0.storage[f"{self.name}:x0 appended"], self.node_0.storage[f"{self.name}:y0"]
-        del self.node_1.storage[f"{self.name}:x1 appended"], self.node_1.storage[f"{self.name}:y1"]
+        del self.node_0.storage[f"{self.name}:x0 appended"], self.node_0.storage[f"{self.name}:y0"], self.node_0.storage[f"{self.name}:z0"]
+        del self.node_1.storage[f"{self.name}:x1 appended"], self.node_1.storage[f"{self.name}:y1"], self.node_1.storage[f"{self.name}:z1"]
 
 if __name__ == "__main__":
     def test__SS_Mul__AppendingX():
@@ -178,9 +171,6 @@ if __name__ == "__main__":
         n2 = Node(communication, "n2")
 
         protocol_name = "ss_mul__cx_n0"
-        n0.storage[f"{protocol_name}:x"] = torch.tensor([[1, 2]]).float()
-        n0.storage[f"{protocol_name}:y0"] = torch.tensor([[0.5], [3]]).float()
-        n1.storage[f"{protocol_name}:y1"] = torch.tensor([[1.5], [-2]]).float()
 
         protocol = SS_Mul__AppendingX([1, 10], 1, torch.matmul, protocol_name, n0, n1, n2, 10)
         protocol.prepare()
@@ -239,6 +229,15 @@ if __name__ == "__main__":
 
         protocol.online_execute()
         print(n0.storage[f"{protocol_name}:z0"] + n1.storage[f"{protocol_name}:z1"])
+
+
+        print("----------Storage----------")
+        print(n0.storage)
+        print(n1.storage)    
+        print("----------Storage (after clear IO)-----------")
+        protocol.clear_io()
+        print(n0.storage)
+        print(n1.storage)  
 
 
     test__SS_Mul__AppendingX()

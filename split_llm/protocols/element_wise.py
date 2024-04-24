@@ -127,6 +127,17 @@ if __name__ == "__main__":
         n1.storage[f"{protocol_name}:x1"] = x - x0
         protocol.online_execute()
 
+        print("-------------Output Expected/Executed--------------")
+        print(x ** 3)
         print(n0.storage[f"{protocol_name}:z0"] + n1.storage[f"{protocol_name}:z1"])
+
+
+        print("----------Storage----------")
+        print(n0.storage)
+        print(n1.storage)    
+        print("----------Storage (after clear IO)-----------")
+        protocol.clear_io()
+        print(n0.storage)
+        print(n1.storage)  
 
     test__SS_ElementWise__RandPerm()

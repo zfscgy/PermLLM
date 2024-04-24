@@ -20,6 +20,8 @@ from split_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
 
 
 from homomorphic_encryption.bfv import BFV
+import tenseal as ts
+
 
 
 class GLMConfig:
@@ -513,7 +515,7 @@ class GLM_TransformerLayerProtocol(Protocol):
 
         self.device = device
 
-        self.name = f"GLM__Transformer_{layer}"
+        self.name = name or f"GLM__Transformer_{layer}"
 
         self.current_length = None
 
@@ -558,19 +560,17 @@ class GLM_TransformerLayerProtocol(Protocol):
 
 
 class GLM_PredictionProtocol(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node,mask_scale: float, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
-        self.layer = layer
     
 
-        self.max_generation_length = max_generation_length
         self.mask_scale = mask_scale
 
         self.device = device
 
-        self.name = f"GLM__PredictionLayer"
+        self.name = name or f"GLM__PredictionLayer"
 
         self.current_length = None
 
@@ -578,12 +578,12 @@ class GLM_PredictionProtocol(Protocol):
         self.randperm_name = f"{self.name}/score_permutation"
 
         self.prediction_dense_protocol = SS_Mul__CX_N0(
-            [GLMConfig.n_tokens, GLMConfig.model_dim], torch.matmul, self.prediction_dense_name,
+            [GLMConfig.model_dim, GLMConfig.n_tokens], (lambda x, y: y @ x), self.prediction_dense_name,
             n0, n1, n2, mask_scale, device
         )
 
         self.randperm_protocol = SS_Perm(
-            permute_with_seed, self.randperm_name, n0, n1, n2, mask_scale, device
+            (lambda x, i: x[i]), self.randperm_name, n0, n1, n2, mask_scale, device
         )
 
     def prepare(self):
@@ -593,38 +593,112 @@ class GLM_PredictionProtocol(Protocol):
         self.prediction_dense_protocol.prepare()
         self.randperm_protocol.prepare()
 
+        # In node_1
+        self.n1.space.bfv_cryptosystem = BFV()
+        self.n1.send(self.n0.name, f"{self.name}:bfv_keys", self.n1.space.bfv_cryptosystem.serialize())
+
+        # In node_0
+        self.n0.space.bfv_cryptosystem = BFV.from_bytes(self.n0.fetch(self.n1.name, f"{self.name}:bfv_keys"))
+
     def offline_execute(self):
         self.prediction_dense_protocol.offline_execute([GLMConfig.model_dim], [GLMConfig.n_tokens])
-        perm_key = np.random.randint(2 ** 30)
-        self.n0.storage[f"{self.randperm_protocol}:new_perm"] = perm_key
+        perm_key = torch.randperm(GLMConfig.n_tokens, device=self.device)
+        self.n0.storage[f"{self.randperm_name}:new_perm"] = perm_key
         self.randperm_protocol.offline_execute([GLMConfig.n_tokens])
     
     def online_execute(self):
         """
         Input:
-            Node 0: x0
-            Node 1: x1
+            Node 0: y0
+            Node 1: y1
         """
-        self.n0.storage[f"{self.prediction_dense_name}:x0"] = self.n0.storage[f"{self.name}:x0"]
-        self.n1.storage[f"{self.prediction_dense_name}:x1"] = self.n1.storage[f"{self.name}:x1"]
+        self.n0.storage[f"{self.prediction_dense_name}:y0"] = self.n0.storage[f"{self.name}:x0"]
+        self.n1.storage[f"{self.prediction_dense_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
         self.prediction_dense_protocol.online_execute()
-        
-        last_dense: nn.Linear = self.n0.space.final_dense
-        self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:x0"] + last_dense.bias
-        self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:x1"]
+
+        self.n0.storage[f"{self.name}:current_permutation"] = self.n0.storage[f"{self.randperm_name}:perm"][-1].tolist()
+        self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:z0"]  # The final prediction layer has no bias
+        self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:z1"]
         self.randperm_protocol.online_execute()
 
         self.n0.send(self.n1.name, f"{self.randperm_name}:permuted_s0", self.n0.storage[f"{self.randperm_name}:z0"])
 
         # In node_1
-        permuted_scores = self.n0.storage[f"{self.randperm_name}:z1"] + \
+        permuted_scores = self.n1.storage[f"{self.randperm_name}:z1"] + \
             self.n1.fetch(self.n0.name, f"{self.randperm_name}:permuted_s0")
 
         # Using the greedy generation
         best_idx = np.argmax(permuted_scores.tolist())
-        indicator = np.zeros([GLMConfig.n_tokens], dtype=np.int)
+        indicator = np.zeros([GLMConfig.n_tokens], dtype=int)
         indicator[best_idx] = 1
+        step_size = self.n1.space.bfv_cryptosystem.ciphertext_size
+        indicator_cts = []
+        for i in range(0, GLMConfig.n_tokens, step_size):
+            indicator_cts.append(self.n1.space.bfv_cryptosystem.enc_vector(indicator[i: i + step_size]))
+        self.n1.send(self.n0.name, f"{self.name}:index_indicator_ct", [c.serialize() for c in indicator_cts])
+        del permuted_scores, best_idx, indicator, step_size, indicator_cts
 
-        bfv_cryptosystem = BFV()
-        bfv_cryptosystem.enc_vector(indicator)
+        # In node_0
         
+        indicator_ct_bytes: List[bytes] = self.n0.fetch(self.n1.name, f"{self.name}:index_indicator_ct")
+        indicator_cts = [ts.bfv_vector_from(self.n0.space.bfv_cryptosystem.context, b) for b in indicator_ct_bytes]
+        index_cts = []
+        step_size = self.n1.space.bfv_cryptosystem.ciphertext_size
+        for i in range(0, GLMConfig.n_tokens, step_size):
+            index_cts.append(indicator_cts[i // step_size].dot(self.n0.storage[f"{self.name}:current_permutation"] [i:i + step_size]))        
+        index_ct: ts.BFVVector = sum(index_cts[1:], start=index_cts[0])
+    
+        self.n0.send(self.n1.name, f"{self.name}:index__ct", index_ct.serialize())
+
+        del indicator_ct_bytes, indicator_cts, index_cts, index_ct
+
+        # In node_1
+        index_ct = ts.bfv_vector_from(self.n1.space.bfv_cryptosystem.context, self.n1.fetch(self.n0.name, f"{self.name}:index__ct"))
+        index = self.n1.space.bfv_cryptosystem.decrypt(index_ct)
+        self.n1.storage[f"{self.name}:z"] = index
+
+        del index_ct, index
+        self.prediction_dense_protocol.clear_io()
+        self.randperm_protocol.clear_io()
+
+
+    def clear_io(self):
+        del self.n0.storage[f"{self.name}:x0"]
+        del self.n1.storage[f"{self.name}:x1"], self.n1.storage[f"{self.name}:z"]
+
+
+class GLM_EmbeddingRetrievalProtocol(Protocol):
+    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, name: str = None, device: str = "cpu"):
+        self.n0 = n0
+        self.n1 = n1
+        self.n2 = n2
+    
+
+        self.mask_scale = mask_scale
+
+        self.device = device
+
+        self.name = name or f"GLM__EmbeddingLayer"
+
+        self.current_length = None
+
+        self.embedding_retrieval_name = f"{self.name}/embedding_retrieval"
+
+        self.embedding_retrieval_protocol = SS_Mul__CX_N0_Y_N1(
+            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x), self.embedding_retrieval_protocol,
+            n0, n1, n2, mask_scale, device
+        )
+
+    def prepare(self):
+        embedding: nn.Linear = self.n0.space.word_embedding
+        self.n0.storage[f"{self.embedding_retrieval_name}:x"] = embedding
+        self.embedding_retrieval_protocol.prepare()
+
+    def offline_execute(self, next_length: int):
+        self.embedding_retrieval_protocol.offline_execute([next_length, GLMConfig.n_tokens])
+
+    def online_execute(self):
+        self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
+        self.embedding_retrieval_protocol.online_execute()
+        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.embedding_retrieval_name}:z0"]
+        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"]
