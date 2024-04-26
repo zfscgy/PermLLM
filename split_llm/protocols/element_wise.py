@@ -46,8 +46,10 @@ class SS_ElementWise__RandPerm(Protocol):
             Those two permutations must be a pair, and the latter is the inverse of the former,
             i.e., f_invperm[f_perm(X, new_perm), new_invperm] = X
         """
-        self.node_0.storage[f"{self.perm_name}:new_perm"] = self.node_0.storage[f"{self.name}:new_perm"]
-        self.node_0.storage[f"{self.invperm_name}:new_perm"] = self.node_0.storage[f"{self.name}:new_invperm"]
+        if self.node_0.local():
+            self.node_0.storage[f"{self.perm_name}:new_perm"] = self.node_0.storage[f"{self.name}:new_perm"]
+            self.node_0.storage[f"{self.invperm_name}:new_perm"] = self.node_0.storage[f"{self.name}:new_invperm"]
+        
         self.perm_protocol.offline_execute(x_shape)
         self.invperm_protocol.offline_execute(x_shape)
 
@@ -59,43 +61,51 @@ class SS_ElementWise__RandPerm(Protocol):
         """
         
         # In node_0
-        self.node_0.storage[f"{self.perm_name}:x0"] = self.node_0.storage[f"{self.name}:x0"]
+        if self.node_0.local():
+            self.node_0.storage[f"{self.perm_name}:x0"] = self.node_0.storage[f"{self.name}:x0"]
         # In node_1
-        self.node_1.storage[f"{self.perm_name}:x1"] = self.node_1.storage[f"{self.name}:x1"]
+        if self.node_1.local():
+            self.node_1.storage[f"{self.perm_name}:x1"] = self.node_1.storage[f"{self.name}:x1"]
 
 
         # Subprotocol
         self.perm_protocol.online_execute()
 
         # In node_0
-        self.node_0.send(self.node_1.name, f"{self.name}:permuted-x0", self.node_0.storage[f"{self.perm_name}:z0"])
+        if self.node_0.local():
+            self.node_0.send(self.node_1.name, f"{self.name}:permuted-x0", self.node_0.storage[f"{self.perm_name}:z0"])
 
         # In node_1
-        permuted_x = self.node_1.fetch(self.node_0.name, f"{self.name}:permuted-x0") + self.node_1.storage[f"{self.perm_name}:z1"]
-        permuted_y = self.f_elemwise(permuted_x)
+        if self.node_1.local():
+            permuted_x = self.node_1.fetch(self.node_0.name, f"{self.name}:permuted-x0") + self.node_1.storage[f"{self.perm_name}:z1"]
+            permuted_y = self.f_elemwise(permuted_x)
 
-        self.node_1.storage[f"{self.invperm_name}:x1"] = permuted_y
+            self.node_1.storage[f"{self.invperm_name}:x1"] = permuted_y
 
-        y_shape = permuted_y.shape
-        del permuted_x, permuted_y
+            del permuted_x, permuted_y
 
         # In node_0
-        self.node_0.storage[f"{self.invperm_name}:x0"] = torch.zeros(*y_shape, device=self.device, dtype=torch.float)
+        if self.node_0.local():
+            self.node_0.storage[f"{self.invperm_name}:x0"] = torch.zeros_like(self.node_0.storage[f"{self.perm_name}:z0"])
 
         # Subprotocol
         self.invperm_protocol.online_execute()
 
         # In node_0
-        self.node_0.storage[f"{self.name}:z0"] = self.node_0.storage[f"{self.invperm_name}:z0"]
+        if self.node_0.local():
+            self.node_0.storage[f"{self.name}:z0"] = self.node_0.storage[f"{self.invperm_name}:z0"]
         # In node_1
-        self.node_1.storage[f"{self.name}:z1"] = self.node_1.storage[f"{self.invperm_name}:z1"]
+        if self.node_1.local():
+            self.node_1.storage[f"{self.name}:z1"] = self.node_1.storage[f"{self.invperm_name}:z1"]
 
         self.perm_protocol.clear_io()
         self.invperm_protocol.clear_io()
 
     def clear_io(self):
-        del self.node_0.storage[f"{self.name}:x0"], self.node_0.storage[f"{self.name}:z0"]
-        del self.node_1.storage[f"{self.name}:x1"], self.node_1.storage[f"{self.name}:z1"]
+        if self.node_0.local():
+            del self.node_0.storage[f"{self.name}:x0"], self.node_0.storage[f"{self.name}:z0"]
+        if self.node_1.local():
+            del self.node_1.storage[f"{self.name}:x1"], self.node_1.storage[f"{self.name}:z1"]
 
 
 

@@ -66,11 +66,11 @@ class Attention_GLM_Wrapped(nn.Module):
         self.n_heads = n_heads
         self.layer_id = layer_id
 
-        self.qkv_weight = nn.Parameter(torch.zeros(model_dim, 3 * model_dim, dtype=torch.float))
+        self.qkv_weight = nn.Parameter(torch.zeros(3 * model_dim, model_dim, dtype=torch.float))
         self.qkv_bias = nn.Parameter(torch.zeros(3 * model_dim, dtype=torch.float))
         
         self.attn_out_weight = nn.Parameter(torch.zeros(model_dim, model_dim, dtype=torch.float))
-        self.attn_out_bias = nn.Parameter(torch.zeros(model_dim, model_dim, dtype=torch.float))
+        self.attn_out_bias = nn.Parameter(torch.zeros(model_dim, dtype=torch.float))
 
         self.positional_embedding = GLMPositionalEmbedding(model_dim // (2 * n_heads))
 
@@ -121,6 +121,7 @@ class Attention_GLM_Wrapped(nn.Module):
         weighted_v = self.generate_weighted_values(softmax_scores, v)
         attn_out = weighted_v @ self.attn_out_weight.T + self.attn_out_bias
         return attn_out
+    
 
 
 class FeedForward_GLM_Wrapped(nn.Module):

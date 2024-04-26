@@ -27,27 +27,30 @@ class SS_Mul__AppendingX(Protocol):
         self.mask_scale = mask_scale
         self.device = device
     
-        self.appended_size_offline = 0
+        self.appended_sizes = []
         self.appended_size_online = 0
 
     def prepare(self):
         # In node_2
-        # Prepare beaver_u with max length
-        u0 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
-        u1 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
-        u = u0 + u1
-        self.node_2.storage[f"{self.name}:beaver_u_extended"] = u
-        self.node_2.send(self.node_0.name, f"{self.name}:beaver_u0 extended", u0)
-        self.node_2.send(self.node_1.name, f"{self.name}:beaver_u1 extended", u1)
-        self.node_2.storage[f"{self.name}:appended_size"] = 0
+        if self.node_2.local():
+            # Prepare beaver_u with max length
+            u0 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            u1 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            u = u0 + u1
+            self.node_2.storage[f"{self.name}:beaver_u_extended"] = u
+            self.node_2.send(self.node_0.name, f"{self.name}:beaver_u0 extended", u0)
+            self.node_2.send(self.node_1.name, f"{self.name}:beaver_u1 extended", u1)
+            self.node_2.storage[f"{self.name}:appended_size"] = 0
 
-        del u0, u1, u
+            del u0, u1, u
 
         # In node_0
-        self.node_0.fetch_and_store(self.node_2.name, f"{self.name}:beaver_u0 extended")
+        if self.node_0.local():
+            self.node_0.fetch_and_store(self.node_2.name, f"{self.name}:beaver_u0 extended")
 
-        # In node_1        
-        self.node_1.fetch_and_store(self.node_2.name, f"{self.name}:beaver_u1 extended")
+        # In node_1
+        if self.node_1.local():        
+            self.node_1.fetch_and_store(self.node_2.name, f"{self.name}:beaver_u1 extended")
 
 
 
@@ -55,111 +58,126 @@ class SS_Mul__AppendingX(Protocol):
         """
         append_size: the size of the tensor appendded to x (in appending_dim)
         """
-        self.appended_size_offline += append_size
-        u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, self.appended_size_offline, device=self.device))
+        self.appended_sizes.insert(0, append_size)
 
-        v0 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
-        v1 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
-        v = v0 + v1
+        # In node_2
+        if self.node_2.local():
+            u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, sum(self.appended_sizes), device=self.device))
+
+            v0 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            v1 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            v = v0 + v1
 
 
-        w = self.f_mul(u, v)
-        w0 = torch.rand(z_shape, device=self.device) * self.mask_scale ** 2 - 0.5 * self.mask_scale ** 2
-        w1 = w - w0
+            w = self.f_mul(u, v)
+            w0 = torch.rand(z_shape, device=self.device) * self.mask_scale ** 2 - 0.5 * self.mask_scale ** 2
+            w1 = w - w0
 
-        self.node_2.send(self.node_0.name, f"{self.name}:beaver_v0, w0", [v0, w0])
+            self.node_2.send(self.node_0.name, f"{self.name}:beaver_v0, w0", [v0, w0])
 
-        self.node_2.send(self.node_1.name, f"{self.name}:beaver_v1, w1", [v1, w1])
+            self.node_2.send(self.node_1.name, f"{self.name}:beaver_v1, w1", [v1, w1])
 
-        del v0, v1, v, w0, w1, w
+            del v0, v1, v, w0, w1, w
 
 
         # In node_0
-        self.node_0.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v0, w0")
+        if self.node_0.local():
+            self.node_0.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v0, w0")
 
         # In node_1
-        self.node_1.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v1, w1")
+        if self.node_1.local():
+            self.node_1.fetch_and_enqueue(self.node_2.name, f"{self.name}:beaver_v1, w1")
 
 
     def online_execute(self):
         """
+        Input:
+            Node 0 holds x0 appended
+            Node 1 holds x1 appended
         Output:
-        Node 0 holds z0
-        Node 1 holds z1
+            Node 0 holds z0
+            Node 1 holds z1
         z0 + z1 = x * y
         """
-        appended_size = self.node_0.storage[f"{self.name}:x0 appended"].shape[self.appending_dim]
+        appended_size = self.appended_sizes.pop()
         self.appended_size_online += appended_size
 
         # In node_0
-        x0_sub_u0_appended = self.node_0.storage[f"{self.name}:x0 appended"] - \
-            torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, 
-                         torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
-        y0_sub_v0 = self.node_0.storage[f"{self.name}:y0"] - self.node_0.storage[f"{self.name}:beaver_v0, w0"][-1][0]
-    
-        self.node_0.storage[f"{self.name}:x0-u0 appended"] = x0_sub_u0_appended
-        self.node_0.storage[f"{self.name}:y0-v0"] = y0_sub_v0
+        if self.node_0.local():
+            x0_sub_u0_appended = self.node_0.storage[f"{self.name}:x0 appended"] - \
+                torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, 
+                            torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
+            y0_sub_v0 = self.node_0.storage[f"{self.name}:y0"] - self.node_0.storage[f"{self.name}:beaver_v0, w0"][-1][0]
         
-        self.node_0.send(self.node_1.name, f"{self.name}:x0-u0 appended, y0-v0", [x0_sub_u0_appended, y0_sub_v0])
+            self.node_0.storage[f"{self.name}:x0-u0 appended"] = x0_sub_u0_appended
+            self.node_0.storage[f"{self.name}:y0-v0"] = y0_sub_v0
+            
+            self.node_0.send(self.node_1.name, f"{self.name}:x0-u0 appended, y0-v0", [x0_sub_u0_appended, y0_sub_v0])
 
-        del x0_sub_u0_appended, y0_sub_v0
+            del x0_sub_u0_appended, y0_sub_v0
 
         # In node_1
+        if self.node_1.local():
+            x1_sub_u1_appended = self.node_1.storage[f"{self.name}:x1 appended"] - \
+                torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, 
+                            torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
+            y1_sub_v1 = self.node_1.storage[f"{self.name}:y1"] - self.node_1.storage[f"{self.name}:beaver_v1, w1"][-1][0]
 
-        x1_sub_u1_appended = self.node_1.storage[f"{self.name}:x1 appended"] - \
-            torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, 
-                         torch.arange(self.appended_size_online - appended_size, self.appended_size_online, device=self.device))
-        y1_sub_v1 = self.node_1.storage[f"{self.name}:y1"] - self.node_1.storage[f"{self.name}:beaver_v1, w1"][-1][0]
+            self.node_1.storage[f"{self.name}:y1-v1"] = y1_sub_v1
 
-        self.node_1.storage[f"{self.name}:y1-v1"] = y1_sub_v1
-
-        self.node_1.send(self.node_0.name, f"{self.name}:x1-u1 appended, y1-v1", [x1_sub_u1_appended, y1_sub_v1])
+            self.node_1.send(self.node_0.name, f"{self.name}:x1-u1 appended, y1-v1", [x1_sub_u1_appended, y1_sub_v1])
 
 
-        x0_sub_u0_appended, y0_sub_v0 = self.node_1.fetch(self.node_0.name, f"{self.name}:x0-u0 appended, y0-v0")
-        if f"{self.name}:x-u" not in self.node_0.storage:
-            self.node_1.storage[f"{self.name}:x-u"] = x1_sub_u1_appended + x0_sub_u0_appended
-        else:
-            self.node_1.storage[f"{self.name}:x-u"] = torch.cat([
-                self.node_1.storage[f"{self.name}:x-u"], 
-                x1_sub_u1_appended + x0_sub_u0_appended], 
-                dim=self.appending_dim)
-        y_sub_v = y0_sub_v0 + self.node_1.storage[f"{self.name}:y1-v1"]
+            x0_sub_u0_appended, y0_sub_v0 = self.node_1.fetch(self.node_0.name, f"{self.name}:x0-u0 appended, y0-v0")
+            if f"{self.name}:x-u" not in self.node_0.storage:
+                self.node_1.storage[f"{self.name}:x-u"] = x1_sub_u1_appended + x0_sub_u0_appended
+            else:
+                self.node_1.storage[f"{self.name}:x-u"] = torch.cat([
+                    self.node_1.storage[f"{self.name}:x-u"], 
+                    x1_sub_u1_appended + x0_sub_u0_appended], 
+                    dim=self.appending_dim)
+            y_sub_v = y0_sub_v0 + self.node_1.storage[f"{self.name}:y1-v1"]
 
-        u1 = torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
-        v1, w1 = self.node_1.storage[f"{self.name}:beaver_v1, w1"].pop()
-        self.node_1.storage[f"{self.name}:z1"] = self.f_mul(u1, y_sub_v) + self.f_mul(self.node_1.storage[f"{self.name}:x-u"], v1) + w1
-        del x1_sub_u1_appended, y1_sub_v1, x0_sub_u0_appended, y0_sub_v0, y_sub_v, u1, v1, w1
+            u1 = torch.index_select(self.node_1.storage[f"{self.name}:beaver_u1 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
+            v1, w1 = self.node_1.storage[f"{self.name}:beaver_v1, w1"].pop()
+            self.node_1.storage[f"{self.name}:z1"] = self.f_mul(u1, y_sub_v) + self.f_mul(self.node_1.storage[f"{self.name}:x-u"], v1) + w1
+            del x1_sub_u1_appended, y1_sub_v1, x0_sub_u0_appended, y0_sub_v0, y_sub_v, u1, v1, w1
 
         # In node_0
-        x1_sub_u1_appended, y1_sub_v1 = self.node_0.fetch(self.node_1.name, f"{self.name}:x1-u1 appended, y1-v1")
-        if f"{self.name}:x-u" not in self.node_0.storage:
-            self.node_0.storage[f"{self.name}:x-u"] = \
-                self.node_0.storage[f"{self.name}:x0-u0 appended"] + x1_sub_u1_appended
-        else:
-            self.node_0.storage[f"{self.name}:x-u"] = torch.cat([
-                self.node_0.storage[f"{self.name}:x-u"], 
-                self.node_0.storage[f"{self.name}:x0-u0 appended"] + x1_sub_u1_appended], 
-                dim=self.appending_dim)
-        
-        y_sub_v = self.node_0.storage[f"{self.name}:y0-v0"] + y1_sub_v1
+        if self.node_0.local():
+            x1_sub_u1_appended, y1_sub_v1 = self.node_0.fetch(self.node_1.name, f"{self.name}:x1-u1 appended, y1-v1")
+            if f"{self.name}:x-u" not in self.node_0.storage:
+                self.node_0.storage[f"{self.name}:x-u"] = \
+                    self.node_0.storage[f"{self.name}:x0-u0 appended"] + x1_sub_u1_appended
+            else:
+                self.node_0.storage[f"{self.name}:x-u"] = torch.cat([
+                    self.node_0.storage[f"{self.name}:x-u"], 
+                    self.node_0.storage[f"{self.name}:x0-u0 appended"] + x1_sub_u1_appended], 
+                    dim=self.appending_dim)
+            
+            y_sub_v = self.node_0.storage[f"{self.name}:y0-v0"] + y1_sub_v1
 
-        u0 = torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
-        v0, w0 = self.node_0.storage[f"{self.name}:beaver_v0, w0"].pop()
-        self.node_0.storage[f"{self.name}:z0"] = \
-              self.f_mul(self.node_0.storage[f"{self.name}:x-u"], y_sub_v) + \
-              self.f_mul(u0, y_sub_v) + self.f_mul(self.node_0.storage[f"{self.name}:x-u"], v0) + w0
+            u0 = torch.index_select(self.node_0.storage[f"{self.name}:beaver_u0 extended"], self.appending_dim, torch.arange(self.appended_size_online, device=self.device))
+            v0, w0 = self.node_0.storage[f"{self.name}:beaver_v0, w0"].pop()
+            self.node_0.storage[f"{self.name}:z0"] = \
+                self.f_mul(self.node_0.storage[f"{self.name}:x-u"], y_sub_v) + \
+                self.f_mul(u0, y_sub_v) + self.f_mul(self.node_0.storage[f"{self.name}:x-u"], v0) + w0
 
-        del x1_sub_u1_appended, y_sub_v, u0, v0, w0, self.node_0.storage[f"{self.name}:x0-u0 appended"]
+            del x1_sub_u1_appended, y_sub_v, u0, v0, w0, self.node_0.storage[f"{self.name}:x0-u0 appended"]
 
 
         # Clear cache
-        del self.node_0.storage[f"{self.name}:y0-v0"]
-        del self.node_1.storage[f"{self.name}:y1-v1"]
+        if self.node_0.local():
+            del self.node_0.storage[f"{self.name}:y0-v0"]
+        if self.node_1.local():
+            del self.node_1.storage[f"{self.name}:y1-v1"]
 
     def clear_io(self):
-        del self.node_0.storage[f"{self.name}:x0 appended"], self.node_0.storage[f"{self.name}:y0"], self.node_0.storage[f"{self.name}:z0"]
-        del self.node_1.storage[f"{self.name}:x1 appended"], self.node_1.storage[f"{self.name}:y1"], self.node_1.storage[f"{self.name}:z1"]
+        if self.node_0.local():
+            del self.node_0.storage[f"{self.name}:x0 appended"], self.node_0.storage[f"{self.name}:y0"], self.node_0.storage[f"{self.name}:z0"]
+        
+        if self.node_1.local():
+            del self.node_1.storage[f"{self.name}:x1 appended"], self.node_1.storage[f"{self.name}:y1"], self.node_1.storage[f"{self.name}:z1"]
 
 if __name__ == "__main__":
     def test__SS_Mul__AppendingX():

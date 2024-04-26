@@ -54,8 +54,9 @@ class Communication:
 
 class SimulatedCommunication(Communication):
     def __init__(self, roles: List[str]):
-        self.comm_history: List[List[dict]] = []
         self.roles = roles
+
+        self.comm_history: List[List[dict]] = []
         self.communication_buffer = dict()
         self.current_stage = -1
         self.stage_names = []
@@ -78,18 +79,6 @@ class SimulatedCommunication(Communication):
     def fetch(self, to_role: str, from_role: str, header: str):
         return self.communication_buffer.pop(f"{from_role}-{to_role}-{header}")
 
-    def generate_report(self, latency: float, bandwidth: float):
-        """
-        The bandwidth's unit is bytes.
-        """
-        comms = [0 for _ in range(self.current_stage)]
-        times = [0 for _ in range(self.current_stage)]
-        for s in range(self.current_stage):
-            for history in self.comm_history[s]:
-                comms[s] += history['size']
-                times[s] += latency + history['size'] / bandwidth
-        
-        return comms, times
 
 
 class Node:
@@ -98,6 +87,16 @@ class Node:
         self.name = name
         self.space = types.SimpleNamespace()
         self.storage = dict()
+
+    @staticmethod
+    def from_remote_name(name: str):
+        return Node(None, name)
+
+    def local(self):
+        """
+        True is the node is in local and can be accessed
+        """
+        return (self.comm is not None)
 
     def send(self, to: str, header: str, message: Any):
         self.comm.send(self.name, to, message, header)

@@ -75,9 +75,16 @@ class GLM_AttentionProtocol(Protocol):
             n0, n1, n2,
             mask_scale, device)
         
+        # Find the local node
+        local_node = None
+        for node in [self.n0, self.n1, self.n2]:
+            if node.local():
+                local_node = node
+                break
+
         self.dot_product_protocol = SS_Mul__AppendingX(
             [self.max_generation_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 0, 
-            (lambda k, q: self.n0.space.attentions[self.layer].generate_logit_scores(q, k)),
+            (lambda k, q: local_node.space.attentions[layer].generate_logit_scores(q, k)),
             self.dot_product_name, 
             n0, n1, n2,
             mask_scale, device
@@ -92,7 +99,7 @@ class GLM_AttentionProtocol(Protocol):
 
         self.weighted_sum_protocol = SS_Mul__AppendingX(
             [self.max_generation_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 0,
-            (lambda v, score: self.n0.space.attentions[self.layer].generate_weighted_values(score, v)),
+            (lambda v, score: local_node.space.attentions[self.layer].generate_weighted_values(score, v)),
             self.weighted_sum_name,
             n0, n1, n2,
             mask_scale, device
@@ -104,15 +111,18 @@ class GLM_AttentionProtocol(Protocol):
             mask_scale, device
         )
 
-        self.n0.storage[f"{self.qkv_mul_name}:x"] = self.n0.space.attentions[self.layer].qkv_weight.T
-        self.n0.storage[f"{self.attn_out_name}:x"] = self.n0.space.attentions[self.layer].attn_out_weight.T
-
     def prepare(self):
+        if self.n0.local():
+            self.n0.storage[f"{self.qkv_mul_name}:x"] = self.n0.space.attentions[self.layer].qkv_weight.T
+            self.n0.storage[f"{self.attn_out_name}:x"] = self.n0.space.attentions[self.layer].attn_out_weight.T
+
+
         self.qkv_mul_protocol.prepare()
         self.dot_product_protocol.prepare()
         self.softmax_protocol.prepare()
         self.weighted_sum_protocol.prepare()
         self.attn_out_protocol.prepare()
+
 
     def offline_execute(self, next_length: int):
         if len(self.position_ids) == 0:
@@ -127,9 +137,11 @@ class GLM_AttentionProtocol(Protocol):
         self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
         self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], [next_length, self.total_length, 1, GLMConfig.n_heads], next_length)
 
-        perm_key = np.random.randint(2 ** 30)
-        self.n0.storage[f"{self.softmax_name}:new_perm"] = perm_key
-        self.n0.storage[f"{self.softmax_name}:new_invperm"] = perm_key
+        if self.n0.local():
+            perm_key = np.random.randint(2 ** 30)
+            self.n0.storage[f"{self.softmax_name}:new_perm"] = perm_key
+            self.n0.storage[f"{self.softmax_name}:new_invperm"] = perm_key
+
         self.softmax_protocol.offline_execute([next_length * GLMConfig.n_heads * 1, self.total_length])
         self.weighted_sum_protocol.offline_execute([next_length, self.total_length, 1, GLMConfig.n_heads], [next_length, 1, GLMConfig.model_dim], next_length)
         self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim])
@@ -144,13 +156,19 @@ class GLM_AttentionProtocol(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.qkv_mul_name}:y0"] = self.n0.storage[f"{self.name}:x0"]
-        self.n1.storage[f"{self.qkv_mul_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.qkv_mul_name}:y0"] = self.n0.storage[f"{self.name}:x0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.qkv_mul_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
 
         self.qkv_mul_protocol.online_execute()
 
-        self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.qkv_mul_name}:z0"] + self.n0.space.attentions[self.layer].qkv_bias
-        self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.qkv_mul_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.qkv_mul_name}:z0"] + self.n0.space.attentions[self.layer].qkv_bias
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.qkv_mul_name}:z1"]
 
         self.qkv_mul_protocol.clear_io()
     
@@ -167,33 +185,37 @@ class GLM_AttentionProtocol(Protocol):
         position_ids = self.position_ids.pop()
         
         # In node_0
-        self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], self.n0.storage[f"{self.name}:v0"] = \
-            self.n0.storage[f"{self.name}:h0"].view(-1, 1, GLMConfig.n_heads, GLMConfig.head_dim * 3).chunk(3, dim=-1)
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], self.n0.storage[f"{self.name}:v0"] = \
+                self.n0.storage[f"{self.name}:h0"].view(-1, 1, GLMConfig.n_heads, GLMConfig.head_dim * 3).chunk(3, dim=-1)
 
-        self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"] = self.positional_embedding(
-            self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], position_ids
-        )
+            self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"] = self.positional_embedding(
+                self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], position_ids
+            )
 
-        self.n0.storage[f"{self.dot_product_name}:x0 appended"] = self.n0.storage[f"{self.name}:k0"]
-        self.n0.storage[f"{self.dot_product_name}:y0"] = self.n0.storage[f"{self.name}:q0"]
+            self.n0.storage[f"{self.dot_product_name}:x0 appended"] = self.n0.storage[f"{self.name}:k0"]
+            self.n0.storage[f"{self.dot_product_name}:y0"] = self.n0.storage[f"{self.name}:q0"]
 
         # In node_1
-        self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], self.n1.storage[f"{self.name}:v1"] = \
-            self.n1.storage[f"{self.name}:h1"].view(-1, 1, GLMConfig.n_heads, GLMConfig.head_dim * 3).chunk(3, dim=-1)
-        
-        self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"] = self.positional_embedding(
-            self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], position_ids
-        )
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], self.n1.storage[f"{self.name}:v1"] = \
+                self.n1.storage[f"{self.name}:h1"].view(-1, 1, GLMConfig.n_heads, GLMConfig.head_dim * 3).chunk(3, dim=-1)
+            
+            self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"] = self.positional_embedding(
+                self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], position_ids
+            )
 
-        self.n1.storage[f"{self.dot_product_name}:x1 appended"] = self.n1.storage[f"{self.name}:k1"]
-        self.n1.storage[f"{self.dot_product_name}:y1"] = self.n1.storage[f"{self.name}:q1"]
+            self.n1.storage[f"{self.dot_product_name}:x1 appended"] = self.n1.storage[f"{self.name}:k1"]
+            self.n1.storage[f"{self.dot_product_name}:y1"] = self.n1.storage[f"{self.name}:q1"]
 
 
         self.dot_product_protocol.online_execute()
 
-
-        self.n0.storage[f"{self.name}:s0"] = self.n0.storage[f"{self.dot_product_name}:z0"]
-        self.n1.storage[f"{self.name}:s1"] = self.n1.storage[f"{self.dot_product_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:s0"] = self.n0.storage[f"{self.dot_product_name}:z0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:s1"] = self.n1.storage[f"{self.dot_product_name}:z1"]
 
         self.dot_product_protocol.clear_io()
 
@@ -208,18 +230,22 @@ class GLM_AttentionProtocol(Protocol):
             Node 1: s1
         """
         # In node_0
-        self.n0.storage[f"{self.softmax_name}:x0"] = self.n0.storage[f"{self.name}:s0"].swapaxes(1, 3).reshape(-1, self.total_length)
+        if self.n0.local():
+            self.n0.storage[f"{self.softmax_name}:x0"] = self.n0.storage[f"{self.name}:s0"].swapaxes(1, 3).reshape(-1, self.total_length)
         # In node_1
-        self.n1.storage[f"{self.softmax_name}:x1"] = self.n1.storage[f"{self.name}:s1"].swapaxes(1, 3).reshape(-1, self.total_length)
+        if self.n1.local():
+            self.n1.storage[f"{self.softmax_name}:x1"] = self.n1.storage[f"{self.name}:s1"].swapaxes(1, 3).reshape(-1, self.total_length)
 
         self.softmax_protocol.online_execute()
 
         # In node_0
-        self.n0.storage[f"{self.name}:s0"] = \
-            self.n0.storage[f"{self.softmax_name}:z0"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:s0"] = \
+                self.n0.storage[f"{self.softmax_name}:z0"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
         # In node_1
-        self.n1.storage[f"{self.name}:s1"] = \
-            self.n1.storage[f"{self.softmax_name}:z1"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:s1"] = \
+                self.n1.storage[f"{self.softmax_name}:z1"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
         
         self.softmax_protocol.clear_io()
 
@@ -234,17 +260,22 @@ class GLM_AttentionProtocol(Protocol):
             Node 1: h1
         """
         # In node_0
-        self.n0.storage[f"{self.weighted_sum_name}:y0"] = self.n0.storage[f"{self.name}:s0"]
-        self.n0.storage[f"{self.weighted_sum_name}:x0 appended"] = self.n0.storage[f"{self.name}:v0"]
+        if self.n0.local():
+            self.n0.storage[f"{self.weighted_sum_name}:y0"] = self.n0.storage[f"{self.name}:s0"]
+            self.n0.storage[f"{self.weighted_sum_name}:x0 appended"] = self.n0.storage[f"{self.name}:v0"]
         
         # In node_1
-        self.n1.storage[f"{self.weighted_sum_name}:y1"] = self.n1.storage[f"{self.name}:s1"]
-        self.n1.storage[f"{self.weighted_sum_name}:x1 appended"] = self.n1.storage[f"{self.name}:v1"]
+        if self.n1.local():
+            self.n1.storage[f"{self.weighted_sum_name}:y1"] = self.n1.storage[f"{self.name}:s1"]
+            self.n1.storage[f"{self.weighted_sum_name}:x1 appended"] = self.n1.storage[f"{self.name}:v1"]
 
         self.weighted_sum_protocol.online_execute()
 
-        self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.weighted_sum_name}:z0"]
-        self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.weighted_sum_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.weighted_sum_name}:z0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.weighted_sum_name}:z1"]
 
         self.weighted_sum_protocol.clear_io()
 
@@ -258,13 +289,18 @@ class GLM_AttentionProtocol(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.attn_out_name}:y0"] = self.n0.storage[f"{self.name}:h0"]
-        self.n1.storage[f"{self.attn_out_name}:y1"] = self.n1.storage[f"{self.name}:h1"]
+
+        if self.n0.local():
+            self.n0.storage[f"{self.attn_out_name}:y0"] = self.n0.storage[f"{self.name}:h0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.attn_out_name}:y1"] = self.n1.storage[f"{self.name}:h1"]
 
         self.attn_out_protocol.online_execute()
 
-        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.attn_out_name}:z0"] + self.n0.space.attentions[self.layer].attn_out_bias
-        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.attn_out_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.attn_out_name}:z0"] + self.n0.space.attentions[self.layer].attn_out_bias
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.attn_out_name}:z1"]
 
         self.attn_out_protocol.clear_io()
 
@@ -286,15 +322,17 @@ class GLM_AttentionProtocol(Protocol):
         self.online_step_attn_out()
 
     def clear_io(self):
-        del self.n0.storage[f"{self.name}:x0"]
-        del self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], self.n0.storage[f"{self.name}:v0"]
-        del self.n0.storage[f"{self.name}:s0"], self.n0.storage[f"{self.name}:h0"]
-        del self.n0.storage[f"{self.name}:z0"]
+        if self.n0.local():
+            del self.n0.storage[f"{self.name}:x0"]
+            del self.n0.storage[f"{self.name}:q0"], self.n0.storage[f"{self.name}:k0"], self.n0.storage[f"{self.name}:v0"]
+            del self.n0.storage[f"{self.name}:s0"], self.n0.storage[f"{self.name}:h0"]
+            del self.n0.storage[f"{self.name}:z0"]
 
-        del self.n1.storage[f"{self.name}:x1"]
-        del self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], self.n1.storage[f"{self.name}:v1"]
-        del self.n1.storage[f"{self.name}:s1"], self.n1.storage[f"{self.name}:h1"]
-        del self.n1.storage[f"{self.name}:z1"]
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:x1"]
+            del self.n1.storage[f"{self.name}:q1"], self.n1.storage[f"{self.name}:k1"], self.n1.storage[f"{self.name}:v1"]
+            del self.n1.storage[f"{self.name}:s1"], self.n1.storage[f"{self.name}:h1"]
+            del self.n1.storage[f"{self.name}:z1"]
 
 
 
@@ -312,8 +350,6 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
         self.device = device
 
         self.name = name or f"FF_Layer_{layer}"
-
-        self.current_length = None
 
 
         self.layernorm_in_name = f"{self.name}/layernorm_in"
@@ -347,23 +383,22 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
         self.layernorm_out_protocol.prepare()
 
     def offline_execute(self, next_length: int):
-        self.current_length = next_length
-
-        perm_key = np.random.randint(2 ** 30)
-        self.n0.storage[f"{self.layernorm_in_name}:new_perm"] = perm_key
-        self.n0.storage[f"{self.layernorm_in_name}:new_invperm"] = perm_key
+        if self.n0.local():
+            perm_key = np.random.randint(2 ** 30)
+            self.n0.storage[f"{self.layernorm_in_name}:new_perm"] = perm_key
+            self.n0.storage[f"{self.layernorm_in_name}:new_invperm"] = perm_key
         self.layernorm_in_protocol.offline_execute([next_length, GLMConfig.model_dim])
         
-
-        perm_key = np.random.randint(2 ** 30)
-        self.n0.storage[f"{self.gelu_name}:new_perm"] = perm_key
-        self.n0.storage[f"{self.gelu_name}:new_invperm"] = perm_key
+        if self.n0.local():
+            perm_key = np.random.randint(2 ** 30)
+            self.n0.storage[f"{self.gelu_name}:new_perm"] = perm_key
+            self.n0.storage[f"{self.gelu_name}:new_invperm"] = perm_key
         self.gelu_protocol.offline_execute([next_length, 4 * GLMConfig.model_dim])
-        
-
-        perm_key = np.random.randint(2 ** 30)
-        self.n0.storage[f"{self.layernorm_out_name}:new_perm"] = perm_key
-        self.n0.storage[f"{self.layernorm_out_name}:new_invperm"] = perm_key
+            
+        if self.n0.local():
+            perm_key = np.random.randint(2 ** 30)
+            self.n0.storage[f"{self.layernorm_out_name}:new_perm"] = perm_key
+            self.n0.storage[f"{self.layernorm_out_name}:new_invperm"] = perm_key
         self.layernorm_out_protocol.offline_execute([next_length, GLMConfig.model_dim])
 
 
@@ -376,18 +411,22 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.layernorm_in_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
-        self.n1.storage[f"{self.layernorm_in_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.layernorm_in_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.layernorm_in_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
 
         self.layernorm_in_protocol.online_execute()
 
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = \
+                self.n0.storage[f"{self.layernorm_in_name}:z0"] * self.n0.space.ffs[self.layer].layernorm_in.weight + \
+                self.n0.space.ffs[self.layer].layernorm_in.bias
 
-        self.n0.storage[f"{self.name}:h0"] = \
-            self.n0.storage[f"{self.layernorm_in_name}:z0"] * self.n0.space.ffs[self.layer].layernorm_in.weight + \
-            self.n0.space.ffs[self.layer].layernorm_in.bias
-
-        self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.layernorm_in_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_in.weight
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = \
+                self.n1.storage[f"{self.layernorm_in_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_in.weight
 
         self.layernorm_in_protocol.clear_io()
 
@@ -400,12 +439,14 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.name}:h0"] = \
-            self.n0.storage[f"{self.name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_in.weight.T + \
-            self.n0.space.ffs[self.layer].mlp_dense_in.bias
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = \
+                self.n0.storage[f"{self.name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_in.weight.T + \
+                self.n0.space.ffs[self.layer].mlp_dense_in.bias
 
-        self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.name}:h1"] @ self.n1.space.ffs[self.layer].mlp_dense_in.weight.T
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = \
+                self.n1.storage[f"{self.name}:h1"] @ self.n1.space.ffs[self.layer].mlp_dense_in.weight.T
         
     def online_step_gelu(self):
         """
@@ -416,13 +457,17 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.gelu_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
-        self.n1.storage[f"{self.gelu_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.gelu_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.gelu_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
 
         self.gelu_protocol.online_execute()
 
-        self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.gelu_name}:z0"]
-        self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.gelu_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.gelu_name}:z0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.gelu_name}:z1"]
     
     def online_step_mlp_out(self):
         """
@@ -433,12 +478,15 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.name}:h0"] = \
-            self.n0.storage[f"{self.name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_out.weight.T + \
-            self.n0.space.ffs[self.layer].mlp_dense_out.bias
 
-        self.n1.storage[f"{self.name}:h1"] = \
-            self.n1.storage[f"{self.name}:h1"] @ self.n1.space.ffs[self.layer].mlp_dense_out.weight.T
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = \
+                self.n0.storage[f"{self.name}:h0"] @ self.n0.space.ffs[self.layer].mlp_dense_out.weight.T + \
+                self.n0.space.ffs[self.layer].mlp_dense_out.bias
+
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = \
+                self.n1.storage[f"{self.name}:h1"] @ self.n1.space.ffs[self.layer].mlp_dense_out.weight.T
         
     def online_step_layernorm_out(self):
         """
@@ -449,17 +497,21 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h0
             Node 1: h1
         """
-        self.n0.storage[f"{self.layernorm_out_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
-        self.n1.storage[f"{self.layernorm_out_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
+
+        if self.n0.local():
+            self.n0.storage[f"{self.layernorm_out_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.layernorm_out_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
 
         self.layernorm_out_protocol.online_execute()
 
-        if not isinstance(self.n0.space.ffs[self.layer].layernorm_out, nn.Identity):
+        
+        if self.n0.local() and not isinstance(self.n0.space.ffs[self.layer].layernorm_out, nn.Identity):
             self.n0.storage[f"{self.name}:h0"] = \
                 self.n0.storage[f"{self.layernorm_out_name}:z0"] * self.n0.space.ffs[self.layer].layernorm_out.weight + \
                 self.n0.space.ffs[self.layer].layernorm_out.bias
 
-        if not isinstance(self.n1.space.ffs[self.layer].layernorm_out, nn.Identity):
+        if self.n1.local() and not isinstance(self.n1.space.ffs[self.layer].layernorm_out, nn.Identity):
             self.n1.storage[f"{self.name}:h1"] = \
                 self.n1.storage[f"{self.layernorm_out_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_out.weight
 
@@ -475,31 +527,47 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 1: z1
         """
         
-        self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.name}:x0"].view(-1, GLMConfig.model_dim)
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] = self.n0.storage[f"{self.name}:x0"].view(-1, GLMConfig.model_dim)
         
-        self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.name}:x1"].view(-1, GLMConfig.model_dim)
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] = self.n1.storage[f"{self.name}:x1"].view(-1, GLMConfig.model_dim)
 
         self.online_step_layernorm_in()
 
-        self.n0.storage[f"{self.name}:h_in_0"] = self.n0.storage[f"{self.name}:h0"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h_in_0"] = self.n0.storage[f"{self.name}:h0"]
         
-        self.n1.storage[f"{self.name}:h_in_1"] = self.n1.storage[f"{self.name}:h1"]
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h_in_1"] = self.n1.storage[f"{self.name}:h1"]
 
 
         self.online_step_mlp_in()
         self.online_step_gelu()
         self.online_step_mlp_out()
 
-
-        self.n0.storage[f"{self.name}:h0"] += (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:h_in_0"] 
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:h0"] += (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:h_in_0"] 
         
-        self.n1.storage[f"{self.name}:h1"] += (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:h_in_1"]
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:h1"] += (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:h_in_1"]
 
         self.online_step_layernorm_out()
 
-        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.name}:h0"].view(-1, 1, GLMConfig.model_dim)
-        
-        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.name}:h1"].view(-1, 1, GLMConfig.model_dim)
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.name}:h0"].view(-1, 1, GLMConfig.model_dim)
+
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.name}:h1"].view(-1, 1, GLMConfig.model_dim)
+
+    def clear_io(self):
+        if self.n0.local():
+            del self.n0.storage[f"{self.name}:x0"]
+            del self.n0.storage[f"{self.name}:z0"]
+
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:x1"]
+            del self.n1.storage[f"{self.name}:z1"]
 
 
 class GLM_TransformerLayerProtocol(Protocol):
@@ -529,9 +597,9 @@ class GLM_TransformerLayerProtocol(Protocol):
         self.attn_protocol.prepare()
         self.ff_protocol.prepare()
 
-    def offline_execute(self):
-        self.attn_protocol.offline_execute()
-        self.ff_protocol.offline_execute()
+    def offline_execute(self, next_length: int):
+        self.attn_protocol.offline_execute(next_length)
+        self.ff_protocol.offline_execute(next_length)
     
     def online_execute(self):
         """
@@ -542,21 +610,39 @@ class GLM_TransformerLayerProtocol(Protocol):
             Node 0: z0
             Node 1: z1
         """
-        self.n0.storage[f"{self.attn_name}:x0"] = self.n0.storage[f"{self.name}:x0"]
-        self.n1.storage[f"{self.attn_name}:x1"] = self.n1.storage[f"{self.name}:x1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.attn_name}:x0"] = self.n0.storage[f"{self.name}:x0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.attn_name}:x1"] = self.n1.storage[f"{self.name}:x1"]
         
         self.attn_protocol.online_execute()
 
-        self.n0.storage[f"{self.ff_name}:x0"] = self.n0.storage[f"{self.attn_name}:x0"] + (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:x0"]
-        self.n1.storage[f"{self.ff_name}:x1"] = self.n1.storage[f"{self.attn_name}:x1"] + (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:x1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.ff_name}:x0"] = self.n0.storage[f"{self.attn_name}:x0"] + (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:x0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.ff_name}:x1"] = self.n1.storage[f"{self.attn_name}:x1"] + (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:x1"]
         
+
         self.ff_protocol.online_execute()
 
-        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.ff_name}:z0"]
-        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.ff_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.ff_name}:z0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.ff_name}:z1"]
         
         self.attn_protocol.clear_io()
         self.ff_protocol.clear_io()
+
+    def clear_io(self):
+        if self.n0.local():
+            del self.n0.storage[f"{self.name}:x0"]
+            del self.n0.storage[f"{self.name}:z0"]
+
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:x1"]
+            del self.n1.storage[f"{self.name}:z1"]
 
 
 class GLM_PredictionProtocol(Protocol):
@@ -587,23 +673,28 @@ class GLM_PredictionProtocol(Protocol):
         )
 
     def prepare(self):
-        last_dense: nn.Linear = self.n0.space.final_dense
-        self.n0.storage[f"{self.prediction_dense_name}:x"] = last_dense.weight[:GLMConfig.n_tokens].T
+        if self.n0.local():
+            last_dense: nn.Linear = self.n0.space.final_dense
+            self.n0.storage[f"{self.prediction_dense_name}:x"] = last_dense.weight[:GLMConfig.n_tokens].T
 
         self.prediction_dense_protocol.prepare()
         self.randperm_protocol.prepare()
 
         # In node_1
-        self.n1.space.bfv_cryptosystem = BFV()
-        self.n1.send(self.n0.name, f"{self.name}:bfv_keys", self.n1.space.bfv_cryptosystem.serialize())
+        if self.n1.local():
+            self.n1.space.bfv_cryptosystem = BFV()
+            self.n1.send(self.n0.name, f"{self.name}:bfv_keys", self.n1.space.bfv_cryptosystem.serialize())
 
         # In node_0
-        self.n0.space.bfv_cryptosystem = BFV.from_bytes(self.n0.fetch(self.n1.name, f"{self.name}:bfv_keys"))
+        if self.n0.local():
+            self.n0.space.bfv_cryptosystem = BFV.from_bytes(self.n0.fetch(self.n1.name, f"{self.name}:bfv_keys"))
 
     def offline_execute(self):
         self.prediction_dense_protocol.offline_execute([GLMConfig.model_dim], [GLMConfig.n_tokens])
-        perm_key = torch.randperm(GLMConfig.n_tokens, device=self.device)
-        self.n0.storage[f"{self.randperm_name}:new_perm"] = perm_key
+        
+        if self.n0.local():
+            perm_key = torch.randperm(GLMConfig.n_tokens, device=self.device)
+            self.n0.storage[f"{self.randperm_name}:new_perm"] = perm_key
         self.randperm_protocol.offline_execute([GLMConfig.n_tokens])
     
     def online_execute(self):
@@ -612,59 +703,73 @@ class GLM_PredictionProtocol(Protocol):
             Node 0: y0
             Node 1: y1
         """
-        self.n0.storage[f"{self.prediction_dense_name}:y0"] = self.n0.storage[f"{self.name}:x0"]
-        self.n1.storage[f"{self.prediction_dense_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.prediction_dense_name}:y0"] = self.n0.storage[f"{self.name}:x0"]
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.prediction_dense_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
+        
         self.prediction_dense_protocol.online_execute()
 
-        self.n0.storage[f"{self.name}:current_permutation"] = self.n0.storage[f"{self.randperm_name}:perm"][-1].tolist()
-        self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:z0"]  # The final prediction layer has no bias
-        self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:z1"]
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:current_permutation"] = self.n0.storage[f"{self.randperm_name}:perm"][-1].tolist()
+            self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:z0"]  # The final prediction layer has no bias
+        
+        if self.n1.local():
+            self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:z1"]
+        
         self.randperm_protocol.online_execute()
 
         self.n0.send(self.n1.name, f"{self.randperm_name}:permuted_s0", self.n0.storage[f"{self.randperm_name}:z0"])
 
         # In node_1
-        permuted_scores = self.n1.storage[f"{self.randperm_name}:z1"] + \
-            self.n1.fetch(self.n0.name, f"{self.randperm_name}:permuted_s0")
+        if self.n1.local():
+            permuted_scores = self.n1.storage[f"{self.randperm_name}:z1"] + \
+                self.n1.fetch(self.n0.name, f"{self.randperm_name}:permuted_s0")
 
-        # Using the greedy generation
-        best_idx = np.argmax(permuted_scores.tolist())
-        indicator = np.zeros([GLMConfig.n_tokens], dtype=int)
-        indicator[best_idx] = 1
-        step_size = self.n1.space.bfv_cryptosystem.ciphertext_size
-        indicator_cts = []
-        for i in range(0, GLMConfig.n_tokens, step_size):
-            indicator_cts.append(self.n1.space.bfv_cryptosystem.enc_vector(indicator[i: i + step_size]))
-        self.n1.send(self.n0.name, f"{self.name}:index_indicator_ct", [c.serialize() for c in indicator_cts])
-        del permuted_scores, best_idx, indicator, step_size, indicator_cts
+            # Using the greedy generation
+            best_idx = np.argmax(permuted_scores.tolist())
+            indicator = np.zeros([GLMConfig.n_tokens], dtype=int)
+            indicator[best_idx] = 1
+            step_size = self.n1.space.bfv_cryptosystem.ciphertext_size
+            indicator_cts = []
+            for i in range(0, GLMConfig.n_tokens, step_size):
+                indicator_cts.append(self.n1.space.bfv_cryptosystem.enc_vector(indicator[i: i + step_size]))
+            self.n1.send(self.n0.name, f"{self.name}:index_indicator_ct", [c.serialize() for c in indicator_cts])
+            del permuted_scores, best_idx, indicator, step_size, indicator_cts
 
         # In node_0
+        if self.n0.local():
+            indicator_ct_bytes: List[bytes] = self.n0.fetch(self.n1.name, f"{self.name}:index_indicator_ct")
+            indicator_cts = [ts.bfv_vector_from(self.n0.space.bfv_cryptosystem.context, b) for b in indicator_ct_bytes]
+            index_cts = []
+            step_size = self.n1.space.bfv_cryptosystem.ciphertext_size
+            for i in range(0, GLMConfig.n_tokens, step_size):
+                index_cts.append(indicator_cts[i // step_size].dot(self.n0.storage[f"{self.name}:current_permutation"] [i:i + step_size]))        
+            index_ct: ts.BFVVector = sum(index_cts[1:], start=index_cts[0])
         
-        indicator_ct_bytes: List[bytes] = self.n0.fetch(self.n1.name, f"{self.name}:index_indicator_ct")
-        indicator_cts = [ts.bfv_vector_from(self.n0.space.bfv_cryptosystem.context, b) for b in indicator_ct_bytes]
-        index_cts = []
-        step_size = self.n1.space.bfv_cryptosystem.ciphertext_size
-        for i in range(0, GLMConfig.n_tokens, step_size):
-            index_cts.append(indicator_cts[i // step_size].dot(self.n0.storage[f"{self.name}:current_permutation"] [i:i + step_size]))        
-        index_ct: ts.BFVVector = sum(index_cts[1:], start=index_cts[0])
-    
-        self.n0.send(self.n1.name, f"{self.name}:index__ct", index_ct.serialize())
+            self.n0.send(self.n1.name, f"{self.name}:index__ct", index_ct.serialize())
 
-        del indicator_ct_bytes, indicator_cts, index_cts, index_ct
+            del indicator_ct_bytes, indicator_cts, index_cts, index_ct
 
         # In node_1
-        index_ct = ts.bfv_vector_from(self.n1.space.bfv_cryptosystem.context, self.n1.fetch(self.n0.name, f"{self.name}:index__ct"))
-        index = self.n1.space.bfv_cryptosystem.decrypt(index_ct)
-        self.n1.storage[f"{self.name}:z"] = index
+        if self.n1.local():
+            index_ct = ts.bfv_vector_from(self.n1.space.bfv_cryptosystem.context, self.n1.fetch(self.n0.name, f"{self.name}:index__ct"))
+            index = self.n1.space.bfv_cryptosystem.decrypt(index_ct)
+            self.n1.storage[f"{self.name}:z"] = index
 
-        del index_ct, index
+            del index_ct, index
+    
         self.prediction_dense_protocol.clear_io()
         self.randperm_protocol.clear_io()
 
 
     def clear_io(self):
-        del self.n0.storage[f"{self.name}:x0"]
-        del self.n1.storage[f"{self.name}:x1"], self.n1.storage[f"{self.name}:z"]
+        if self.n0.local():
+            del self.n0.storage[f"{self.name}:x0"]
+        
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:x1"], self.n1.storage[f"{self.name}:z"]
 
 
 class GLM_EmbeddingRetrievalProtocol(Protocol):
@@ -690,15 +795,30 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
         )
 
     def prepare(self):
-        embedding: nn.Linear = self.n0.space.word_embedding
-        self.n0.storage[f"{self.embedding_retrieval_name}:x"] = embedding
+        if self.n0.local():
+            embedding: nn.Linear = self.n0.space.word_embedding
+            self.n0.storage[f"{self.embedding_retrieval_name}:x"] = embedding
         self.embedding_retrieval_protocol.prepare()
 
     def offline_execute(self, next_length: int):
         self.embedding_retrieval_protocol.offline_execute([next_length, GLMConfig.n_tokens])
 
     def online_execute(self):
-        self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
+        if self.n1.local():
+            self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
+    
         self.embedding_retrieval_protocol.online_execute()
-        self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.embedding_retrieval_name}:z0"]
-        self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"]
+        
+        if self.n0.local():
+            self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.embedding_retrieval_name}:z0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"]
+
+    def clear_io(self):
+        if self.n0.local():
+            del self.n0.storage[f"{self.name}:z0"]
+
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:y"]
+            del self.n1.storage[f"{self.name}:z1"]
+        
