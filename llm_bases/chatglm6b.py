@@ -13,13 +13,14 @@ from transformers import AutoTokenizer, AutoModel
 
 
 class ChatGML6B:
-    pretrained_model_path: str = "/home/zf/projects/chatglm-6b"
-    device: str = "cpu"
-    dtype: torch.dtype = torch.half
+    pretrained_model_path: str = "/root/autodl-tmp/chatglm-6b"
+
 
     n_tokens: int = 130005
 
-    def __init__(self):
+    def __init__(self, device: str = "cpu"):
+        self.device: str = device
+        self.dtype: torch.dtype = torch.half
         self.tokenizer: ChatGLMTokenizer = ChatGLMTokenizer.from_pretrained(self.pretrained_model_path)
         self.condgen: ChatGLMForConditionalGeneration = \
             ChatGLMForConditionalGeneration.from_pretrained(self.pretrained_model_path).half().to(self.device)
@@ -109,7 +110,7 @@ class ChatGML6B:
 
 
 if __name__ == '__main__':
-    model = ChatGML6B()
+    model = ChatGML6B("cuda")
     print(model.chat("Introduce yourself to us, please")[0])
 
     def test_greedy_generate():
