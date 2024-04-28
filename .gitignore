@@ -1,4 +1,4 @@
-.vscode/
+# .vscode/  It is useful since the debug configuration is the same
 __pycache__/
 /saved_data
 .ipynb_checkpoints/

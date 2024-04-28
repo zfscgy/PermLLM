@@ -74,18 +74,27 @@ class Attention_GLM_Wrapped(nn.Module):
 
         self.positional_embedding = GLMPositionalEmbedding(model_dim // (2 * n_heads))
 
+    def generate_qkv(self, x: torch.Tensor, position_ids: torch.Tensor):
+        qkv = (x @ self.qkv_weight.T + self.qkv_bias).view(*x.shape[:2], self.n_heads, 3 * self.model_dim // self.n_heads)
+        # Notice the order here: first divide into multiple heads, then each head is split into q, k, v
+
+        q, k, v = qkv.chunk(3, dim=-1)
+        q, k = self.positional_embedding(q, k, position_ids)
+        
+        return q, k, v
+
     def generate_logit_scores(self, q: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
         """
         q: [query_len, batch, n_heads, head_dim]
         k: [key_len, batch, n_heads, head_dim]
         k can contain different key vectors, so the first dimension could be different than q
         """
-        q = q / (np.sqrt(self.model_dim // self.n_heads) * (self.layer_id + 1))
+        q = q
 
         q = q[:, None]  # [q_len, 1, batch, n_heads, head_dim]
         k = k[None, :]  # [1, k_len, batch, n_heads, head_dim]
 
-        logits = torch.sum(q * k, dim=-1) * (self.layer_id + 1)  # [q_len, k_len, batch, n_heads]
+        logits = torch.sum(q * k, dim=-1)  # [q_len, k_len, batch, n_heads]
         return logits
 
     def generate_softmax_scores(self, logit_scores: torch.Tensor, dim: int=1) -> torch.Tensor:
@@ -93,7 +102,7 @@ class Attention_GLM_Wrapped(nn.Module):
         logit_scores: [q_len, k_len, batch, n_heads]
         It seems that attention_mask is useless during the inference!
         """
-        return F.softmax(logit_scores, dim)  # [q_len, k_len, batch, n_heads]
+        return F.softmax(logit_scores  / np.sqrt(self.model_dim // self.n_heads), dim)  # [q_len, k_len, batch, n_heads]
     
     def generate_weighted_values(self, softmax_scores: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """
@@ -108,14 +117,7 @@ class Attention_GLM_Wrapped(nn.Module):
         return weighted_v
 
     def forward(self, x: torch.Tensor, position_ids: torch.Tensor) -> torch.Tensor:
-        qkv = (x @ self.qkv_weight.T + self.qkv_bias).view(*x.shape[:2], self.n_heads, 3 * self.model_dim // self.n_heads)
-        # Notice the order here: first divide into multiple heads, then each head is split into q, k, v
-
-        q, k, v = qkv.chunk(3, dim=-1)
-        q, k = self.positional_embedding(q, k, position_ids)
-        # print("Q:", q)
-        # print("K:", k)
-        # print("V:", v)
+        q, k, v = self.generate_qkv(x, position_ids)
         logit_scores = self.generate_logit_scores(q, k)
         softmax_scores = self.generate_softmax_scores(logit_scores)  # [q_len, ]
         weighted_v = self.generate_weighted_values(softmax_scores, v)
