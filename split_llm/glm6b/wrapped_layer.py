@@ -94,7 +94,7 @@ class Attention_GLM_Wrapped(nn.Module):
         q = q[:, None]  # [q_len, 1, batch, n_heads, head_dim]
         k = k[None, :]  # [1, k_len, batch, n_heads, head_dim]
 
-        logits = torch.sum(q * k, dim=-1)  # [q_len, k_len, batch, n_heads]
+        logits = torch.sum(q * k, dim=-1)  / np.sqrt(self.model_dim // self.n_heads) # [q_len, k_len, batch, n_heads]
         return logits
 
     def generate_softmax_scores(self, logit_scores: torch.Tensor, dim: int=1) -> torch.Tensor:
@@ -102,7 +102,7 @@ class Attention_GLM_Wrapped(nn.Module):
         logit_scores: [q_len, k_len, batch, n_heads]
         It seems that attention_mask is useless during the inference!
         """
-        return F.softmax(logit_scores  / np.sqrt(self.model_dim // self.n_heads), dim)  # [q_len, k_len, batch, n_heads]
+        return F.softmax(logit_scores, dim)  # [q_len, k_len, batch, n_heads]
     
     def generate_weighted_values(self, softmax_scores: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """

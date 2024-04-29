@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Union, Dict
 
 import torch
 
@@ -13,7 +13,7 @@ class SS_ElementWise__RandPerm(Protocol):
     def __init__(self, f_perm: Callable, f_invperm: Callable, f_elemwise: Callable,
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
-                mask_scale: float, device: str="cpu") -> None:
+                mask_scale: Union[float, Dict[str, float]], device: str="cpu") -> None:
         """
         f_perm(x, perm)
         """
@@ -24,15 +24,20 @@ class SS_ElementWise__RandPerm(Protocol):
         self.node_0 = node_0
         self.node_1 = node_1
         self.node_2 = node_2
+        if not isinstance(mask_scale, dict):
+            mask_scale = {
+                "x": mask_scale,
+                "z": mask_scale
+            }
         self.mask_scale = mask_scale
         self.device = device
 
 
         self.perm_name = f"{self.name}/perm"
-        self.perm_protocol = SS_Perm(f_perm, self.perm_name, node_0, node_1, node_2, mask_scale, device)
+        self.perm_protocol = SS_Perm(f_perm, self.perm_name, node_0, node_1, node_2, mask_scale["x"], device)
 
         self.invperm_name = f"{self.name}/invperm"
-        self.invperm_protocol = SS_Perm(f_invperm, self.invperm_name, node_0, node_1, node_2, mask_scale, device)
+        self.invperm_protocol = SS_Perm(f_invperm, self.invperm_name, node_0, node_1, node_2, mask_scale["z"], device)
 
     
     def prepare(self):

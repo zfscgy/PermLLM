@@ -1,4 +1,4 @@
-from typing import Callable
+from typing import Callable, Union, Dict
 
 import torch
 
@@ -12,7 +12,7 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
     def __init__(self, x_shape, f_mul: Callable, 
                  name: str, 
                  node_0: Node, node_1: Node, node_2: Node,
-                 mask_scale: float, device: str="cpu") -> None:
+                 mask_scale: Union[float, Dict[str, float]], device: str="cpu") -> None:
         """
         X is constant in node_0 
         Y is not constant in node_1
@@ -23,6 +23,12 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
         self.node_0 = node_0
         self.node_1 = node_1
         self.node_2 = node_2
+        if not isinstance(mask_scale, dict):
+            mask_scale = {
+                "u": mask_scale,
+                "v": mask_scale,
+                "w": mask_scale
+            }
         self.mask_scale = mask_scale
         self.device = device
 
@@ -34,7 +40,7 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
         
         # In node_2
         if self.node_2.local():
-            u = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            u = torch.rand(*self.x_shape, device=self.device) * self.mask_scale['u'] - 0.5 * self.mask_scale['u']
             # Prepare the shares of U
             self.node_2.storage[f"{self.name}:beaver_u"] = u
 
@@ -62,12 +68,12 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
             u = self.node_2.storage[f"{self.name}:beaver_u"]
 
             # Prepare the beaver triples
-            v = torch.rand(y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            v = torch.rand(y_shape, device=self.device) * self.mask_scale['v'] - 0.5 * self.mask_scale['v']
             self.node_2.send(self.node_1.name, f"{self.name}:beaver_v", v)
 
 
             w = self.f_mul(u, v)
-            w0 = torch.rand(z_shape, device=self.device) * self.mask_scale ** 2 - 0.5 * self.mask_scale ** 2
+            w0 = torch.rand(z_shape, device=self.device) * self.mask_scale['w'] - 0.5 * self.mask_scale['w']
             w1 = w - w0
 
             self.node_2.send(self.node_0.name, f"{self.name}:beaver_w0", w0)

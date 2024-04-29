@@ -16,7 +16,7 @@ class ChatGML6B:
     pretrained_model_path: str = "/root/autodl-tmp/chatglm-6b"
 
 
-    n_tokens: int = 130005
+    n_tokens: int = 130006  # 130005 is the eos token
 
     def __init__(self, device: str = "cpu"):
         self.device: str = device

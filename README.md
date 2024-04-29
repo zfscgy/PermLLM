@@ -8,7 +8,7 @@ You may only install the following libraries mannually with Conda to run PermLLM
 
 *   Required by ChatGLM-6B
     ```
-    transformers=4.27.1  (APIs change often, so other versions doesn't work!)
+    transformers=4.27.1  (APIs change often, so other versions don't work!)
     sentencepiece
     ```
     To check, run `llm_bases/chatglm6b.py`

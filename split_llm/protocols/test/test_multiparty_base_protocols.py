@@ -11,6 +11,7 @@ from split_llm.protocols.base_protocols import SS_Mul__CX_N0_Y_N1
 from split_llm.common.utils import test_func
 
 
+
 @test_func
 def test__SS_Mul__CX_N0_Y_N1():
     address_dict = {
@@ -27,7 +28,7 @@ def test__SS_Mul__CX_N0_Y_N1():
     sock0.connect_all()
     sock1.connect_all()
     sock2.connect_all()
-    
+
     comm0 = RealCommunication(["n0", "n1", "n2"], {"n0": sock0})
     comm1 = RealCommunication(["n0", "n1", "n2"], {"n1": sock1})
     comm2 = RealCommunication(["n0", "n1", "n2"], {"n2": sock2})

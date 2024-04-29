@@ -24,6 +24,13 @@ class SS_Mul__AppendingX(Protocol):
         self.node_0 = node_0
         self.node_1 = node_1
         self.node_2 = node_2
+
+        if not isinstance(mask_scale, dict):
+            mask_scale = {
+                "u": mask_scale,
+                "v": mask_scale,
+                "w": mask_scale
+            }
         self.mask_scale = mask_scale
         self.device = device
     
@@ -34,8 +41,8 @@ class SS_Mul__AppendingX(Protocol):
         # In node_2
         if self.node_2.local():
             # Prepare beaver_u with max length
-            u0 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
-            u1 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            u0 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale['u'] - 0.5 * self.mask_scale['u']
+            u1 = torch.rand(*self.x_shape, device=self.device) * self.mask_scale['u'] - 0.5 * self.mask_scale['u']
             u = u0 + u1
             self.node_2.storage[f"{self.name}:beaver_u_extended"] = u
             self.node_2.send(self.node_0.name, f"{self.name}:beaver_u0 extended", u0)
@@ -64,13 +71,13 @@ class SS_Mul__AppendingX(Protocol):
         if self.node_2.local():
             u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, sum(self.appended_sizes), device=self.device))
 
-            v0 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
-            v1 = torch.rand(*y_shape, device=self.device) * self.mask_scale - 0.5 * self.mask_scale
+            v0 = torch.rand(*y_shape, device=self.device) * self.mask_scale['v'] - 0.5 * self.mask_scale['v']
+            v1 = torch.rand(*y_shape, device=self.device) * self.mask_scale['v'] - 0.5 * self.mask_scale['v']
             v = v0 + v1
 
 
             w = self.f_mul(u, v)
-            w0 = torch.rand(z_shape, device=self.device) * self.mask_scale ** 2 - 0.5 * self.mask_scale ** 2
+            w0 = torch.rand(z_shape, device=self.device) * self.mask_scale['w'] - 0.5 * self.mask_scale['w']
             w1 = w - w0
 
             self.node_2.send(self.node_0.name, f"{self.name}:beaver_v0, w0", [v0, w0])

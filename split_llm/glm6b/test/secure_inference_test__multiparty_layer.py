@@ -18,14 +18,14 @@ def test_layer():
 
     # Initialize transformer layers
 
-    attn_wrapped = Attention_GLM_Wrapped(4096, 32, 0).cuda()
+    attn_wrapped = Attention_GLM_Wrapped(4096, 32, 0).to(device)
     attn_wrapped.requires_grad_(False)
-    ff_wrapped = FeedForward_GLM_Wrapped(4096, 32, 0).cuda()
+    ff_wrapped = FeedForward_GLM_Wrapped(4096, 32, 0).to(device)
     ff_wrapped.requires_grad_(False)
 
     print("Start perform local inference")
-    xs = torch.normal(0, 1, [10, 1, 4096]).cuda()
-    position_ids = generate_position_ids(10, 10).cuda()
+    xs = torch.normal(0, 1, [10, 1, 4096]).to(device)
+    position_ids = generate_position_ids(10, 10).to(device)
     
 
     expected_h = attn_wrapped(xs, position_ids)
@@ -59,7 +59,7 @@ def test_layer():
     n2 = Node(comm2, "n2")
 
     # Delete sensitive weights
-    attn_wrapped_public = Attention_GLM_Wrapped(4096, 32, 0).cuda()
+    attn_wrapped_public = Attention_GLM_Wrapped(4096, 32, 0).to(device)
     attn_wrapped_public.qkv_weight = None
     attn_wrapped_public.qkv_bias = None
     attn_wrapped_public.attn_out_weight = None
@@ -75,7 +75,7 @@ def test_layer():
 
     protocol_name = "transformer_layer"
     
-    x0 = torch.normal(0, 1, [10, 1, 4096]).cuda()
+    x0 = torch.normal(0, 1, [10, 1, 4096]).to(device)
     x1 = xs - x0
     n0.storage[f"{protocol_name}:x0"] = x0
     n1.storage[f"{protocol_name}:x1"] = x1
@@ -105,7 +105,7 @@ def test_layer():
     offline_th1.join()
     offline_th2.join()
     print(f"Offline execution stopped in {time.time() - start_time:.3}s.")
-
+    input("Press any key to start online...")
     print("Start online execute...")
     start_time = time.time()
     online_th1 = threading.Thread(target=protocol1.online_execute)

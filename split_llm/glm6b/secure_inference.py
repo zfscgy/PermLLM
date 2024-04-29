@@ -1,4 +1,4 @@
-from typing import List, Callable
+from typing import Any, List, Dict, Callable, Union
 from functools import partial
 
 import numpy as np
@@ -42,8 +42,30 @@ def setup_node(node: Node,
     node.space.final_dense = lm_head_layer
 
 
+
+def get_sub_dict(raw_dict: Dict[str, Any], prefix: str):
+    sub_dict = dict()
+    for k in raw_dict:
+        if k.startswith(prefix):
+            sub_dict[k.removeprefix(prefix)] = raw_dict[k]
+    return sub_dict
+
+
 class GLM_AttentionProtocol(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+    mask_scale_keys = ["qkv/u", "qkv/v", "qkv/w", 
+                       "dot_product/u", "dot_product/v", "dot_product/w", 
+                       "softmax/x", "softmax/z", 
+                       "weighted_sum/u", "weighted_sum/v", "weighted_sum/w",
+                       "attn_out/u", "attn_out/v", "attn_out/w"]
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+        """
+        mask_scale keys (description): 
+            qkv/u (h), qkv/v (qkv_weight), qkv/w
+            dot_product/u (k), dot_product/v (q), dot_product/w
+            softmax/x, softmax/z,
+            weighted_sum/u, weighted_sum/v, weighted_sum/w,
+            attn_out/u, attn_out/v, attn_out/w
+        """
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -51,6 +73,9 @@ class GLM_AttentionProtocol(Protocol):
     
 
         self.max_generation_length = max_generation_length
+
+        if not isinstance(mask_scale, dict):
+            mask_scale = {k: mask_scale for k in self.mask_scale_keys}
         self.mask_scale = mask_scale
 
         self.prompt_length = None
@@ -73,7 +98,7 @@ class GLM_AttentionProtocol(Protocol):
             [GLMConfig.model_dim, GLMConfig.model_dim * 3], 
             (lambda w, x: x @ w), self.qkv_mul_name,
             n0, n1, n2,
-            mask_scale, device)
+            get_sub_dict(mask_scale, "qkv/"), device)
         
         # Find the local node
         local_node = None
@@ -87,14 +112,14 @@ class GLM_AttentionProtocol(Protocol):
             (lambda k, q: local_node.space.attentions[layer].generate_logit_scores(q, k)),
             self.dot_product_name, 
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "dot_product/"), device
         )
 
         self.softmax_protocol = SS_ElementWise__RandPerm(
             permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
             partial(torch.softmax, dim=-1), self.softmax_name,
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "softmax/"), device
         )
 
         self.weighted_sum_protocol = SS_Mul__AppendingX(
@@ -102,13 +127,13 @@ class GLM_AttentionProtocol(Protocol):
             (lambda v, score: local_node.space.attentions[self.layer].generate_weighted_values(score, v)),
             self.weighted_sum_name,
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "weighted_sum/"), device
         )
 
         self.attn_out_protocol = SS_Mul__CX_N0(
             [GLMConfig.model_dim, GLMConfig.model_dim], (lambda w, x: x @ w), self.attn_out_name,
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "attn_out/"), device
         )
 
     def prepare(self):
@@ -337,7 +362,12 @@ class GLM_AttentionProtocol(Protocol):
 
 
 class GLM_FeedForwardProtocol_PlainWeights(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+    mask_scale_keys = [
+        "layernorm_in/x", "layernorm_in/z", 
+        "gelu/x", "gelu/z", 
+        "layernorm_out/x", "layernorm_out/z" 
+    ]
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], max_generation_length: int = 500, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -345,6 +375,9 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
     
 
         self.max_generation_length = max_generation_length
+
+        if not isinstance(mask_scale, dict):
+            mask_scale = {k: mask_scale for k in self.mask_scale_keys}
         self.mask_scale = mask_scale
 
         self.device = device
@@ -360,21 +393,21 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
             partial(F.layer_norm, normalized_shape=[GLMConfig.model_dim]), self.layernorm_in_name,
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "layernorm_in/"), device
         )
 
         self.gelu_protocol = SS_ElementWise__RandPerm(
             permute_with_seed, partial(permute_with_seed, reverse=True),
             F.gelu, self.gelu_name,
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "gelu/"), device
         )
 
         self.layernorm_out_protocol = SS_ElementWise__RandPerm(
             permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
             partial(F.layer_norm, normalized_shape=[GLMConfig.model_dim]), self.layernorm_out_name,
             n0, n1, n2,
-            mask_scale, device
+            get_sub_dict(mask_scale, "layernorm_out/"), device
         )
 
     def prepare(self):
@@ -571,6 +604,7 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
 
 
 class GLM_TransformerLayerProtocol(Protocol):
+    mask_scale_keys = GLM_AttentionProtocol.mask_scale_keys + GLM_FeedForwardProtocol_PlainWeights.mask_scale_keys
     def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
@@ -646,12 +680,14 @@ class GLM_TransformerLayerProtocol(Protocol):
 
 
 class GLM_PredictionProtocol(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node,mask_scale: float, name: str = None, device: str = "cpu"):
+    mask_scale_keys = ["final_dense/u","final_dense/v", "final_dense/w", "score_permutation"]
+    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
-    
 
+        if not isinstance(mask_scale, dict):
+            mask_scale = {k: mask_scale for k in self.mask_scale_keys}
         self.mask_scale = mask_scale
 
         self.device = device
@@ -665,11 +701,11 @@ class GLM_PredictionProtocol(Protocol):
 
         self.prediction_dense_protocol = SS_Mul__CX_N0(
             [GLMConfig.model_dim, GLMConfig.n_tokens], (lambda x, y: y @ x), self.prediction_dense_name,
-            n0, n1, n2, mask_scale, device
+            n0, n1, n2, get_sub_dict(mask_scale, "final_dense/"), device
         )
 
         self.randperm_protocol = SS_Perm(
-            (lambda x, i: x[i]), self.randperm_name, n0, n1, n2, mask_scale, device
+            (lambda x, i: x[i]), self.randperm_name, n0, n1, n2, mask_scale["score_permutation"], device
         )
 
     def prepare(self):
@@ -790,7 +826,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
         self.embedding_retrieval_name = f"{self.name}/embedding_retrieval"
 
         self.embedding_retrieval_protocol = SS_Mul__CX_N0_Y_N1(
-            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x), self.embedding_retrieval_protocol,
+            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x), self.embedding_retrieval_name,
             n0, n1, n2, mask_scale, device
         )
 
@@ -804,6 +840,10 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
         self.embedding_retrieval_protocol.offline_execute([next_length, GLMConfig.n_tokens])
 
     def online_execute(self):
+        """
+        Input:
+            Node 1: x
+        """
         if self.n1.local():
             self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
     
@@ -821,4 +861,89 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
         if self.n1.local():
             del self.n1.storage[f"{self.name}:y"]
             del self.n1.storage[f"{self.name}:z1"]
+
+
+class GLM_Protocol(Protocol):
+    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, max_generation_length: int, name: str = None, device: str = "cpu"):
+        self.n0 = n0
+        self.n1 = n1
+        self.n2 = n2
+    
+        if not isinstance(mask_scale, dict):
+            mask_scale: dict = dict()
+            mask_scale.update({"embedding_retrieval/u": mask_scale, "embedding_retrieval/v": mask_scale, "embedding_retrieval/w": mask_scale})
+            mask_scale.update({"prediction/" + k: mask_scale for k in GLM_PredictionProtocol.mask_scale_keys})
+            for layer in range(28):  # there are total 28 layers in GLM
+                mask_scale.update({f"transformer_layer_{layer}/" + k: mask_scale for k in GLM_TransformerLayerProtocol.mask_scale_keys})
+
+        self.mask_scale = mask_scale
+
+        self.device = device
+
+        self.name = name or f"GLM__Whole"
+
+        self.embedding_retrieval_name = "embedding_retrieval"
+        self.embedding_retrieval_protocol = GLM_EmbeddingRetrievalProtocol(
+            n0, n1, n2, get_sub_dict(mask_scale, "embedding_retrieval/"), self.embedding_retrieval_name, device
+        )
+
+        self.layer_names = [f"transformer_layer_{i}" for i in range(28)]
+        self.layer_protocols = [
+            GLM_TransformerLayerProtocol(n0, n1, n2, i, get_sub_dict(mask_scale, f"transformer_layer_{i}/"), max_generation_length, self.layer_names[i], device)
+            for i in range(28)
+        ]
         
+        self.prediction_name = "prediction"
+        self.prediction_protocol = GLM_PredictionProtocol(n0, n1, n2, get_sub_dict(mask_scale, "prediction/"), self.prediction_name, device)
+
+
+    def prepare(self):
+        self.embedding_retrieval_protocol.prepare()
+        for layer_protocol in self.layer_protocols:
+            layer_protocol.prepare()
+        self.prediction_protocol.prepare()
+
+    
+    def offline_execute(self, next_length: int):
+        self.embedding_retrieval_protocol.offline_execute(next_length)
+        for layer_protocol in self.layer_protocols:
+            layer_protocol.offline_execute(next_length)
+        self.prediction_protocol.offline_execute()
+
+    def online_execute(self):
+        if self.n1.local():
+            self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
+        self.embedding_retrieval_protocol.online_execute()
+
+        self.embedding_retrieval_protocol.clear_io()
+
+        if self.n0.local():
+            self.n0.storage[f"{self.layer_names[0]}:x0"] = self.n1.storage[f"{self.embedding_retrieval_name}:z0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.layer_names[0]}:x1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"]
+        
+        for i in range(28):
+            self.layer_protocols[i].online_execute()
+            if i != 28:
+                if self.n0.local():
+                    self.n0.storage[f"{self.layer_names[i + 1]}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"]
+                if self.n1.local():
+                    self.n1.storage[f"{self.layer_names[i + 1]}:x1"] = self.n1.storage[f"{self.layer_names[i]}:z1"]
+            
+            self.layer_protocols[i].clear_io()
+
+
+        if self.n0.local():
+            self.n0.storage[f"{self.prediction_name}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.prediction_name}:x1"] = self.n1.storage[f"{self.layer_names[i]}:z1"]
+
+        self.prediction_protocol.online_execute()
+
+        self.n1.storage[f"{self.name}:z"] = self.n1.storage[f"{self.prediction_name}:z"]
+
+        self.prediction_protocol.clear_io()
+
+    def clear_io(self):
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:x"], self.n1.storage[f"{self.name}:z"]
