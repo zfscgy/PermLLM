@@ -79,7 +79,7 @@ class GLM_AttentionProtocol(Protocol):
         self.mask_scale = mask_scale
 
         self.prompt_length = None
-        self.total_length = None
+        self.total_length = 0
         self.current_length = None
         self.position_ids = []
         self.positional_embedding = GLMPositionalEmbedding(64).to(device)
@@ -150,13 +150,13 @@ class GLM_AttentionProtocol(Protocol):
 
 
     def offline_execute(self, next_length: int):
-        if len(self.position_ids) == 0:
+        if self.total_length == 0:
             self.prompt_length = next_length
             self.total_length = next_length
-            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length).to(self.device))
+            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length)[..., -next_length:].to(self.device))
         else:
             self.total_length += next_length
-            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length).to(self.device))
+            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length)[..., -next_length:].to(self.device))
         self.current_length = next_length
 
         self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
@@ -833,11 +833,11 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
     def prepare(self):
         if self.n0.local():
             embedding: nn.Linear = self.n0.space.word_embedding
-            self.n0.storage[f"{self.embedding_retrieval_name}:x"] = embedding
+            self.n0.storage[f"{self.embedding_retrieval_name}:x"] = embedding.weight
         self.embedding_retrieval_protocol.prepare()
 
     def offline_execute(self, next_length: int):
-        self.embedding_retrieval_protocol.offline_execute([next_length, GLMConfig.n_tokens])
+        self.embedding_retrieval_protocol.offline_execute([next_length, GLMConfig.n_tokens], [next_length, GLMConfig.model_dim])
 
     def online_execute(self):
         """
@@ -845,7 +845,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
             Node 1: x
         """
         if self.n1.local():
-            self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
+            self.n1.storage[f"{self.embedding_retrieval_name}:y"] = self.n1.storage[f"{self.name}:x"]
     
         self.embedding_retrieval_protocol.online_execute()
         
@@ -859,7 +859,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
             del self.n0.storage[f"{self.name}:z0"]
 
         if self.n1.local():
-            del self.n1.storage[f"{self.name}:y"]
+            del self.n1.storage[f"{self.name}:x"]
             del self.n1.storage[f"{self.name}:z1"]
 
 
@@ -869,12 +869,16 @@ class GLM_Protocol(Protocol):
         self.n1 = n1
         self.n2 = n2
     
+
+        # Convert mask_scale into dict
         if not isinstance(mask_scale, dict):
-            mask_scale: dict = dict()
-            mask_scale.update({"embedding_retrieval/u": mask_scale, "embedding_retrieval/v": mask_scale, "embedding_retrieval/w": mask_scale})
-            mask_scale.update({"prediction/" + k: mask_scale for k in GLM_PredictionProtocol.mask_scale_keys})
+            mask_scale_dict: dict = dict()
+            mask_scale_dict.update({"embedding_retrieval/u": mask_scale, "embedding_retrieval/v": mask_scale, "embedding_retrieval/w": mask_scale})
+            mask_scale_dict.update({"prediction/" + k: mask_scale for k in GLM_PredictionProtocol.mask_scale_keys})
             for layer in range(28):  # there are total 28 layers in GLM
-                mask_scale.update({f"transformer_layer_{layer}/" + k: mask_scale for k in GLM_TransformerLayerProtocol.mask_scale_keys})
+                mask_scale_dict.update({f"transformer_layer_{layer}/" + k: mask_scale for k in GLM_TransformerLayerProtocol.mask_scale_keys})
+
+        mask_scale = mask_scale_dict
 
         self.mask_scale = mask_scale
 
@@ -915,28 +919,32 @@ class GLM_Protocol(Protocol):
             self.n1.storage[f"{self.embedding_retrieval_name}:x"] = self.n1.storage[f"{self.name}:x"]
         self.embedding_retrieval_protocol.online_execute()
 
+        if self.n0.local():
+            self.n0.storage[f"{self.layer_names[0]}:x0"] = self.n0.storage[f"{self.embedding_retrieval_name}:z0"][:, None]  
+            # adding the batch dimension
+        if self.n1.local():
+            self.n1.storage[f"{self.layer_names[0]}:x1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"][:, None]
+        
         self.embedding_retrieval_protocol.clear_io()
 
-        if self.n0.local():
-            self.n0.storage[f"{self.layer_names[0]}:x0"] = self.n1.storage[f"{self.embedding_retrieval_name}:z0"]
-        if self.n1.local():
-            self.n1.storage[f"{self.layer_names[0]}:x1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"]
-        
         for i in range(28):
             self.layer_protocols[i].online_execute()
-            if i != 28:
+            if i != 27:  # Except the last layer
                 if self.n0.local():
                     self.n0.storage[f"{self.layer_names[i + 1]}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"]
                 if self.n1.local():
                     self.n1.storage[f"{self.layer_names[i + 1]}:x1"] = self.n1.storage[f"{self.layer_names[i]}:z1"]
-            
-            self.layer_protocols[i].clear_io()
+
+                self.layer_protocols[i].clear_io()
 
 
+        i = 27  # Here is the last transformer layer
         if self.n0.local():
-            self.n0.storage[f"{self.prediction_name}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"]
+            self.n0.storage[f"{self.prediction_name}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"][-1, 0]  # Extract the last embedding
         if self.n1.local():
-            self.n1.storage[f"{self.prediction_name}:x1"] = self.n1.storage[f"{self.layer_names[i]}:z1"]
+            self.n1.storage[f"{self.prediction_name}:x1"] = self.n1.storage[f"{self.layer_names[i]}:z1"][-1, 0]
+
+        self.layer_protocols[i].clear_io()
 
         self.prediction_protocol.online_execute()
 

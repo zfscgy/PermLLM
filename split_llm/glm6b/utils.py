@@ -6,6 +6,9 @@ from split_llm.common.torch_utils import inverse_permutation
 
 
 def generate_position_ids(input_seq_len: int, current_total_len: int):
+    """
+    Return: [1, 2, total_len]
+    """
     p0 = list(range(input_seq_len - 1)) + [input_seq_len - 2] * (current_total_len - input_seq_len + 1)
     p1 = [0] * (input_seq_len - 1) + list(range(1, current_total_len - input_seq_len + 2))
     return torch.tensor(np.array([[p0, p1]]))
@@ -32,3 +35,8 @@ def gelu_openai(x):
     """OpenAI's gelu implementation."""
     return 0.5 * x * (1.0 + torch.tanh(0.7978845608028654 * x *
                                        (1.0 + 0.044715 * x * x)))
+
+
+if __name__ == "__main__":
+    print(generate_attention_mask(3, 5))
+    

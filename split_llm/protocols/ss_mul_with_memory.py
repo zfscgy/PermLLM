@@ -35,6 +35,7 @@ class SS_Mul__AppendingX(Protocol):
         self.device = device
     
         self.appended_sizes = []
+        self.appended_size_offline = 0
         self.appended_size_online = 0
 
     def prepare(self):
@@ -66,10 +67,12 @@ class SS_Mul__AppendingX(Protocol):
         append_size: the size of the tensor appendded to x (in appending_dim)
         """
         self.appended_sizes.insert(0, append_size)
+        self.appended_size_offline += append_size  
+        # Notice it is the total appended size, not like sum(append_sizes), which only preserves untaken appended sizes
 
         # In node_2
         if self.node_2.local():
-            u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, sum(self.appended_sizes), device=self.device))
+            u = torch.index_select(self.node_2.storage[f"{self.name}:beaver_u_extended"], self.appending_dim, torch.arange(0, self.appended_size_offline, device=self.device))
 
             v0 = torch.rand(*y_shape, device=self.device) * self.mask_scale['v'] - 0.5 * self.mask_scale['v']
             v1 = torch.rand(*y_shape, device=self.device) * self.mask_scale['v'] - 0.5 * self.mask_scale['v']
