@@ -205,7 +205,7 @@ if __name__ == "__main__":
 
         protocol.offline_execute([5, 1], [1, 1], 5)
         protocol.offline_execute([8, 1], [1, 1], 3)
-        protocol.offline_execute([10, 1], [1, 1], 2)
+
         
 
         # 1
@@ -232,7 +232,7 @@ if __name__ == "__main__":
         n0.storage[f"{protocol_name}:x0 appended"] = x0_appended
         n1.storage[f"{protocol_name}:x1 appended"] = x1_appended
         
-        y = torch.ones([8, 1])
+        y = torch.ones([8, 1]) * 2
         y0 = torch.rand_like(y) * 5 - 2.5
         y1 = y - y0
         n0.storage[f"{protocol_name}:y0"] = y0
@@ -243,13 +243,16 @@ if __name__ == "__main__":
 
 
         # 3
+        protocol.offline_execute([10, 1], [1, 1], 2)
+
+
         x_appended = torch.tensor([[9, 10]]).float()
         x0_appended = torch.rand_like(x_appended) * 5 - 2.5
         x1_appended = x_appended - x0_appended
         n0.storage[f"{protocol_name}:x0 appended"] = x0_appended
         n1.storage[f"{protocol_name}:x1 appended"] = x1_appended
         
-        y = torch.ones([10, 1])
+        y = torch.ones([10, 1]) * 3
         y0 = torch.rand_like(y) * 5 - 2.5
         y1 = y - y0
         n0.storage[f"{protocol_name}:y0"] = y0

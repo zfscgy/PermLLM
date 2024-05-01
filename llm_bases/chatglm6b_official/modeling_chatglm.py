@@ -1286,7 +1286,7 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
 
     @torch.no_grad()
     def  chat(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, max_length: int = 2048, num_beams=1,
-             do_sample=True, top_p=0.7, temperature=0.95, logits_processor=None, **kwargs):
+             do_sample=False, top_p=0.7, temperature=0.95, logits_processor=None, **kwargs):
         if history is None:
             history = []
         if logits_processor is None:
@@ -1312,7 +1312,7 @@ class ChatGLMForConditionalGeneration(ChatGLMPreTrainedModel):
 
     @torch.no_grad()
     def stream_chat(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, max_length: int = 2048,
-                    do_sample=True, top_p=0.7, temperature=0.95, logits_processor=None, **kwargs):
+                    do_sample=False, top_p=0.7, temperature=0.95, logits_processor=None, **kwargs):
         if history is None:
             history = []
         if logits_processor is None:

@@ -28,7 +28,8 @@ class GLMConfig:
     model_dim = 4096
     n_heads = 32
     head_dim = 128
-    n_tokens = 130006
+    n_tokens = 130528
+    n_layers = 28
 
 
 def setup_node(node: Node, 
@@ -78,9 +79,9 @@ class GLM_AttentionProtocol(Protocol):
             mask_scale = {k: mask_scale for k in self.mask_scale_keys}
         self.mask_scale = mask_scale
 
-        self.prompt_length = None
+        self.prompt_length = 0
         self.total_length = 0
-        self.current_length = None
+        self.next_lengths = []
         self.position_ids = []
         self.positional_embedding = GLMPositionalEmbedding(64).to(device)
 
@@ -151,13 +152,14 @@ class GLM_AttentionProtocol(Protocol):
 
     def offline_execute(self, next_length: int):
         if self.total_length == 0:
-            self.prompt_length = next_length
+            self.prompt_length = next_length + 1
             self.total_length = next_length
-            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length)[..., -next_length:].to(self.device))
+            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.prompt_length)[..., :-1].to(self.device))  
+            # Notice that the first 'next length' does not include the [start] token.
         else:
             self.total_length += next_length
             self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length)[..., -next_length:].to(self.device))
-        self.current_length = next_length
+        self.next_lengths.insert(0, next_length)
 
         self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
         self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], [next_length, self.total_length, 1, GLMConfig.n_heads], next_length)
@@ -263,14 +265,15 @@ class GLM_AttentionProtocol(Protocol):
 
         self.softmax_protocol.online_execute()
 
+        current_next_length = self.next_lengths.pop()
         # In node_0
         if self.n0.local():
             self.n0.storage[f"{self.name}:s0"] = \
-                self.n0.storage[f"{self.softmax_name}:z0"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
+                self.n0.storage[f"{self.softmax_name}:z0"].view(current_next_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
         # In node_1
         if self.n1.local():
             self.n1.storage[f"{self.name}:s1"] = \
-                self.n1.storage[f"{self.softmax_name}:z1"].view(self.current_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
+                self.n1.storage[f"{self.softmax_name}:z1"].view(current_next_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
         
         self.softmax_protocol.clear_io()
 
@@ -427,7 +430,8 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             self.n0.storage[f"{self.gelu_name}:new_perm"] = perm_key
             self.n0.storage[f"{self.gelu_name}:new_invperm"] = perm_key
         self.gelu_protocol.offline_execute([next_length, 4 * GLMConfig.model_dim])
-            
+        
+
         if self.n0.local():
             perm_key = np.random.randint(2 ** 30)
             self.n0.storage[f"{self.layernorm_out_name}:new_perm"] = perm_key
@@ -530,21 +534,19 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h0
             Node 1: h1
         """
-
         if self.n0.local():
             self.n0.storage[f"{self.layernorm_out_name}:x0"] = self.n0.storage[f"{self.name}:h0"]
         if self.n1.local():
             self.n1.storage[f"{self.layernorm_out_name}:x1"] = self.n1.storage[f"{self.name}:h1"]
 
         self.layernorm_out_protocol.online_execute()
-
-        
-        if self.n0.local() and not isinstance(self.n0.space.ffs[self.layer].layernorm_out, nn.Identity):
+    
+        if self.n0.local():
             self.n0.storage[f"{self.name}:h0"] = \
                 self.n0.storage[f"{self.layernorm_out_name}:z0"] * self.n0.space.ffs[self.layer].layernorm_out.weight + \
                 self.n0.space.ffs[self.layer].layernorm_out.bias
 
-        if self.n1.local() and not isinstance(self.n1.space.ffs[self.layer].layernorm_out, nn.Identity):
+        if self.n1.local():
             self.n1.storage[f"{self.name}:h1"] = \
                 self.n1.storage[f"{self.layernorm_out_name}:z1"] * self.n1.space.ffs[self.layer].layernorm_out.weight
 
@@ -619,8 +621,6 @@ class GLM_TransformerLayerProtocol(Protocol):
 
         self.name = name or f"GLM__Transformer_{layer}"
 
-        self.current_length = None
-
         self.attn_name = f"{self.name}/attn"
         self.ff_name = f"{self.name}/ff"
 
@@ -653,9 +653,9 @@ class GLM_TransformerLayerProtocol(Protocol):
         self.attn_protocol.online_execute()
 
         if self.n0.local():
-            self.n0.storage[f"{self.ff_name}:x0"] = self.n0.storage[f"{self.attn_name}:x0"] + (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:x0"]
+            self.n0.storage[f"{self.ff_name}:x0"] = self.n0.storage[f"{self.attn_name}:z0"] + (2 * 28) ** 0.5 * self.n0.storage[f"{self.name}:x0"]
         if self.n1.local():
-            self.n1.storage[f"{self.ff_name}:x1"] = self.n1.storage[f"{self.attn_name}:x1"] + (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:x1"]
+            self.n1.storage[f"{self.ff_name}:x1"] = self.n1.storage[f"{self.attn_name}:z1"] + (2 * 28) ** 0.5 * self.n1.storage[f"{self.name}:x1"]
         
 
         self.ff_protocol.online_execute()
@@ -693,8 +693,6 @@ class GLM_PredictionProtocol(Protocol):
         self.device = device
 
         self.name = name or f"GLM__PredictionLayer"
-
-        self.current_length = None
 
         self.prediction_dense_name = f"{self.name}/final_dense"
         self.randperm_name = f"{self.name}/score_permutation"
@@ -821,8 +819,6 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
 
         self.name = name or f"GLM__EmbeddingLayer"
 
-        self.current_length = None
-
         self.embedding_retrieval_name = f"{self.name}/embedding_retrieval"
 
         self.embedding_retrieval_protocol = SS_Mul__CX_N0_Y_N1(
@@ -875,7 +871,7 @@ class GLM_Protocol(Protocol):
             mask_scale_dict: dict = dict()
             mask_scale_dict.update({"embedding_retrieval/u": mask_scale, "embedding_retrieval/v": mask_scale, "embedding_retrieval/w": mask_scale})
             mask_scale_dict.update({"prediction/" + k: mask_scale for k in GLM_PredictionProtocol.mask_scale_keys})
-            for layer in range(28):  # there are total 28 layers in GLM
+            for layer in range(GLMConfig.n_layers):  # there are total 28 layers in GLM
                 mask_scale_dict.update({f"transformer_layer_{layer}/" + k: mask_scale for k in GLM_TransformerLayerProtocol.mask_scale_keys})
 
         mask_scale = mask_scale_dict
@@ -894,7 +890,7 @@ class GLM_Protocol(Protocol):
         self.layer_names = [f"transformer_layer_{i}" for i in range(28)]
         self.layer_protocols = [
             GLM_TransformerLayerProtocol(n0, n1, n2, i, get_sub_dict(mask_scale, f"transformer_layer_{i}/"), max_generation_length, self.layer_names[i], device)
-            for i in range(28)
+            for i in range(GLMConfig.n_layers)
         ]
         
         self.prediction_name = "prediction"
@@ -927,9 +923,9 @@ class GLM_Protocol(Protocol):
         
         self.embedding_retrieval_protocol.clear_io()
 
-        for i in range(28):
+        for i in range(GLMConfig.n_layers):
             self.layer_protocols[i].online_execute()
-            if i != 27:  # Except the last layer
+            if i != GLMConfig.n_layers - 1:  # Except the last layer
                 if self.n0.local():
                     self.n0.storage[f"{self.layer_names[i + 1]}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"]
                 if self.n1.local():
@@ -938,7 +934,7 @@ class GLM_Protocol(Protocol):
                 self.layer_protocols[i].clear_io()
 
 
-        i = 27  # Here is the last transformer layer
+        i = GLMConfig.n_layers - 1  # Here is the last transformer layer
         if self.n0.local():
             self.n0.storage[f"{self.prediction_name}:x0"] = self.n0.storage[f"{self.layer_names[i]}:z0"][-1, 0]  # Extract the last embedding
         if self.n1.local():

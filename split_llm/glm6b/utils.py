@@ -19,7 +19,7 @@ def generate_attention_mask(input_seq_len: int, current_total_len: int):
     attention_mask[:, :, pos, :] to get the attention mask on the position
     """
     attention_mask = np.tril(np.ones([1, 1, current_total_len, current_total_len]))
-    attention_mask[:, :, :, :input_seq_len] = 1
+    attention_mask[:, :, :, :input_seq_len - 1] = 1
     return torch.tensor(attention_mask) < 0.5
 
 
@@ -38,5 +38,5 @@ def gelu_openai(x):
 
 
 if __name__ == "__main__":
-    print(generate_attention_mask(3, 5))
-    
+    print(generate_position_ids(2, 2))
+    print(generate_position_ids(3, 3))

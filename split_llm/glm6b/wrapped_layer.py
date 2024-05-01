@@ -170,7 +170,7 @@ def copy_feedforward(glm_block: GLMBlock, next_glm_block: GLMBlock, feed_forward
         copy_param(next_glm_block.input_layernorm.weight, feed_forward.layernorm_out.weight)
         copy_param(next_glm_block.input_layernorm.bias, feed_forward.layernorm_out.bias)
     else:
-        feed_forward.layernorm_out = nn.Identity()  # No layernorm at the last transformer!
+        feed_forward.layernorm_out = None  # No layernorm at the last transformer!
 
 
 
