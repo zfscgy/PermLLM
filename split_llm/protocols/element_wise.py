@@ -10,6 +10,7 @@ from split_llm.common.utils import test_func
 
 
 class SS_ElementWise__RandPerm(Protocol):
+    mask_scale_keys = ["x", "z"]
     def __init__(self, f_perm: Callable, f_invperm: Callable, f_elemwise: Callable,
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,

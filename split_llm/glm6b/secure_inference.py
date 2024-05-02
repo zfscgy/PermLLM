@@ -33,15 +33,14 @@ class GLMConfig:
 
 
 def setup_node(node: Node, 
-               attention_layers: List[Attention_GLM_Wrapped], 
-               ff_layers: List[FeedForward_GLM_Wrapped],
-               word_embedding: nn.Embedding,
-               lm_head_layer: nn.Linear):
+               attention_layers: List[Attention_GLM_Wrapped] = None, 
+               ff_layers: List[FeedForward_GLM_Wrapped] = None,
+               word_embedding: nn.Embedding = None,
+               input_layernorm: nn.LayerNorm = None):
     node.space.attentions = attention_layers
     node.space.ffs = ff_layers
     node.space.word_embedding = word_embedding
-    node.space.final_dense = lm_head_layer
-
+    node.space.input_layernorm = input_layernorm
 
 
 def get_sub_dict(raw_dict: Dict[str, Any], prefix: str):
@@ -680,8 +679,9 @@ class GLM_TransformerLayerProtocol(Protocol):
 
 
 class GLM_PredictionProtocol(Protocol):
-    mask_scale_keys = ["final_dense/u","final_dense/v", "final_dense/w", "score_permutation"]
-    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
+    mask_scale_keys = ["final_dense/v", "final_dense/w", "score_permutation"]
+
+    def __init__(self, n0: Node, n1: Node, n2: Node, embedding_name: str, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -694,24 +694,35 @@ class GLM_PredictionProtocol(Protocol):
 
         self.name = name or f"GLM__PredictionLayer"
 
+        
+        self.embedding_name = embedding_name  # x (embedding.weight/lm_head.weight) is shared
         self.prediction_dense_name = f"{self.name}/final_dense"
         self.randperm_name = f"{self.name}/score_permutation"
 
         self.prediction_dense_protocol = SS_Mul__CX_N0(
-            [GLMConfig.model_dim, GLMConfig.n_tokens], (lambda x, y: y @ x), self.prediction_dense_name,
+            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x.T), self.prediction_dense_name,
             n0, n1, n2, get_sub_dict(mask_scale, "final_dense/"), device
         )
-
         self.randperm_protocol = SS_Perm(
             (lambda x, i: x[i]), self.randperm_name, n0, n1, n2, mask_scale["score_permutation"], device
         )
 
     def prepare(self):
-        if self.n0.local():
-            last_dense: nn.Linear = self.n0.space.final_dense
-            self.n0.storage[f"{self.prediction_dense_name}:x"] = last_dense.weight[:GLMConfig.n_tokens].T
 
-        self.prediction_dense_protocol.prepare()
+        # prediction_dense protocols's x is the same as the embedding_retrieval protocol
+        # So just copying the weight (reference) instead of allocating new storage
+        # Also the beaver triples are shared!
+
+
+        if self.n0.local():
+            self.n0.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:x"] = self.n0.storage[f"{self.embedding_name}/onehot_matmul:x"]
+
+        if self.n1.local():
+            self.n1.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:x-u"] =  self.n1.storage[f"{self.embedding_name}/onehot_matmul:x-u"] 
+ 
+        if self.n2.local():
+            self.n2.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:beaver_u"] = self.n2.storage[f"{self.embedding_name}/onehot_matmul:beaver_u"] 
+
         self.randperm_protocol.prepare()
 
         # In node_1
@@ -807,33 +818,53 @@ class GLM_PredictionProtocol(Protocol):
 
 
 class GLM_EmbeddingRetrievalProtocol(Protocol):
+    mask_scale_keys = ["onehot_matmul/u", "onehot_matmul/v", "onehot_matmul/w", "layernorm_in/x", "layernorm_in/z"]
+
     def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
-    
+        if not isinstance(mask_scale, dict):
+            mask_scale = {k: mask_scale for k in self.mask_scale_keys}
 
         self.mask_scale = mask_scale
+
 
         self.device = device
 
         self.name = name or f"GLM__EmbeddingLayer"
 
-        self.embedding_retrieval_name = f"{self.name}/embedding_retrieval"
-
-        self.embedding_retrieval_protocol = SS_Mul__CX_N0_Y_N1(
-            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x), self.embedding_retrieval_name,
-            n0, n1, n2, mask_scale, device
+        self.onehot_matmul_name = f"{self.name}/onehot_matmul"
+        self.onehot_matmul_protocol = SS_Mul__CX_N0_Y_N1(
+            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x), self.onehot_matmul_name,
+            n0, n1, n2, get_sub_dict(mask_scale, "onehot_matmul/"), device
         )
+
+        self.layernorm_in_name = f"{self.name}/layernorm_in"
+        self.layernorm_in_protocol = SS_ElementWise__RandPerm(
+            permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
+            partial(F.layer_norm, normalized_shape=[GLMConfig.model_dim]), self.layernorm_in_name,
+            n0, n1, n2,
+            get_sub_dict(mask_scale, "layernorm_in/"), device
+        )
+
 
     def prepare(self):
         if self.n0.local():
             embedding: nn.Linear = self.n0.space.word_embedding
-            self.n0.storage[f"{self.embedding_retrieval_name}:x"] = embedding.weight
-        self.embedding_retrieval_protocol.prepare()
+            self.n0.storage[f"{self.onehot_matmul_name}:x"] = embedding
+        self.onehot_matmul_protocol.prepare()
+        self.layernorm_in_protocol.prepare()
 
     def offline_execute(self, next_length: int):
-        self.embedding_retrieval_protocol.offline_execute([next_length, GLMConfig.n_tokens], [next_length, GLMConfig.model_dim])
+        self.onehot_matmul_protocol.offline_execute([next_length, GLMConfig.n_tokens], [next_length, GLMConfig.model_dim])
+        
+        if self.n0.local():
+            perm_key = np.random.randint(2 ** 30)
+            self.n0.storage[f"{self.layernorm_in_name}:new_perm"] = perm_key
+            self.n0.storage[f"{self.layernorm_in_name}:new_invperm"] = perm_key
+        self.layernorm_in_protocol.offline_execute([next_length, GLMConfig.model_dim])
+
 
     def online_execute(self):
         """
@@ -841,14 +872,21 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
             Node 1: x
         """
         if self.n1.local():
-            self.n1.storage[f"{self.embedding_retrieval_name}:y"] = self.n1.storage[f"{self.name}:x"]
+            self.n1.storage[f"{self.onehot_matmul_name}:y"] = self.n1.storage[f"{self.name}:x"]
     
-        self.embedding_retrieval_protocol.online_execute()
+        self.onehot_matmul_protocol.online_execute()
+
+        if self.n0.local():
+            self.n0.storage[f"{self.layernorm_in_name}:x0"] = self.n0.storage[f"{self.onehot_matmul_name}:z0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.layernorm_in_name}:x1"] = self.n1.storage[f"{self.onehot_matmul_name}:z1"]
+
+        self.layernorm_in_protocol.online_execute()
         
         if self.n0.local():
-            self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.embedding_retrieval_name}:z0"]
+            self.n0.storage[f"{self.name}:z0"] = self.n0.storage[f"{self.layernorm_in_name}:z0"] * self.n0.space.input_layernorm.weight + self.n0.space.input_layernorm.bias
         if self.n1.local():
-            self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.embedding_retrieval_name}:z1"]
+            self.n1.storage[f"{self.name}:z1"] = self.n1.storage[f"{self.layernorm_in_name}:z1"] * self.n0.space.input_layernorm.weight
 
     def clear_io(self):
         if self.n0.local():
@@ -869,7 +907,7 @@ class GLM_Protocol(Protocol):
         # Convert mask_scale into dict
         if not isinstance(mask_scale, dict):
             mask_scale_dict: dict = dict()
-            mask_scale_dict.update({"embedding_retrieval/u": mask_scale, "embedding_retrieval/v": mask_scale, "embedding_retrieval/w": mask_scale})
+            mask_scale_dict.update({"embedding_retrieval/" + k: mask_scale for k in GLM_EmbeddingRetrievalProtocol.mask_scale_keys})
             mask_scale_dict.update({"prediction/" + k: mask_scale for k in GLM_PredictionProtocol.mask_scale_keys})
             for layer in range(GLMConfig.n_layers):  # there are total 28 layers in GLM
                 mask_scale_dict.update({f"transformer_layer_{layer}/" + k: mask_scale for k in GLM_TransformerLayerProtocol.mask_scale_keys})
@@ -894,7 +932,7 @@ class GLM_Protocol(Protocol):
         ]
         
         self.prediction_name = "prediction"
-        self.prediction_protocol = GLM_PredictionProtocol(n0, n1, n2, get_sub_dict(mask_scale, "prediction/"), self.prediction_name, device)
+        self.prediction_protocol = GLM_PredictionProtocol(n0, n1, n2, self.embedding_retrieval_name, get_sub_dict(mask_scale, "prediction/"), self.prediction_name, device)
 
 
     def prepare(self):

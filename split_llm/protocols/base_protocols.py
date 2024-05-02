@@ -9,6 +9,7 @@ from split_llm.protocols.base import Protocol
 
 
 class SS_Mul__CX_N0_Y_N1(Protocol):
+    mask_scale_keys = ["u", "v", "w"]
     def __init__(self, x_shape, f_mul: Callable, 
                  name: str, 
                  node_0: Node, node_1: Node, node_2: Node,
@@ -123,6 +124,7 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
 
 
 class SS_Mul__CX_N0(Protocol):
+    mask_scale_keys = ["u", "v", "w"]
     def __init__(self, x_shape, f_mul: Callable, 
                 name: str, 
                 node_0: Node, node_1: Node, node_2: Node,
@@ -137,7 +139,15 @@ class SS_Mul__CX_N0(Protocol):
         self.node_0 = node_0
         self.node_1 = node_1
         self.node_2 = node_2
+
         self.mask_scale = mask_scale
+        if not isinstance(mask_scale, dict):
+            mask_scale = {
+                "u": mask_scale,
+                "v": mask_scale,
+                "w": mask_scale
+            }
+
         self.device = device
         sub_protocol_name = name + "/SS_Mul__CX_N0_Y_N1"
         self.sub_protocol = SS_Mul__CX_N0_Y_N1(
@@ -191,6 +201,7 @@ class SS_Mul__CX_N0(Protocol):
         if self.node_1.local():
             del self.node_1.storage[f"{self.name}:z1"]
 
+
 class SS_Perm(Protocol):
     def __init__(self, f_perm: Callable, 
                 name: str, 
@@ -206,6 +217,7 @@ class SS_Perm(Protocol):
         self.node_0 = node_0
         self.node_1 = node_1
         self.node_2 = node_2
+
         self.mask_scale = mask_scale
         self.device = device
 
