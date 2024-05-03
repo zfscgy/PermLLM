@@ -17,3 +17,9 @@ You may only install the following libraries mannually with Conda to run PermLLM
     ```
     tenseal  (For BFV homomorphic encryption)
     ```
+
+
+
+## Some notes
+
+1.  Notice that `lm_head` shares the same weight with `word_embedding`!

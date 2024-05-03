@@ -20,6 +20,7 @@ class SocketException(Exception):
 
 
 def read_socket(s: socket.socket) -> bytes:
+    buffer_size = 1000_000  # Send 1Mb data at max each time
     try:
         flag = s.recv(len(SocketConfig.start_flag))
         if flag != SocketConfig.start_flag:
@@ -31,21 +32,25 @@ def read_socket(s: socket.socket) -> bytes:
 
         content_len = int.from_bytes(len_bytes, byteorder='big')
         logger.debug("Get message size %d" % content_len)
-        content = bytes()
-        while len(content) < content_len:
-            content += s.recv(content_len - len(content))
-        return content
+        received_content = bytes()
+        while len(received_content) < content_len:
+            received_content += s.recv(min(buffer_size, content_len - len(received_content)))
+            time.sleep(0.001)
+        return received_content
     except Exception as e:
         raise SocketException(f"Socket read error: {e}")
 
 
 def write_socket(s: socket.socket, content: bytes):
+    buffer_size = 1000_000  # Send 1Mb data at max each time
     try:
         content_len = len(content) + SocketConfig.len_header + len(SocketConfig.start_flag)
-        len_bytes = len(content).to_bytes(SocketConfig.len_header, 'big')
+        len_bytes = len(content).to_bytes(SocketConfig.len_header, byteorder='big')
         send_bytes = SocketConfig.start_flag + len_bytes + content
-        while content_len != 0:
-            content_len -= s.send(send_bytes[-content_len:])
+        sent_len = 0
+        while sent_len != content_len:
+            end_pos = min(len(send_bytes), sent_len + buffer_size)
+            sent_len += s.send(send_bytes[sent_len: end_pos])
 
     except Exception as e:
         raise SocketException(f"Socket send error: {e}")
@@ -150,7 +155,7 @@ class SocketServer:
             raise SocketException("Peer name %s dose not exist or not connected yet" % name)
         s = self.other_send_sockets[name]
         write_socket(s, data)
-        
+
         msg_len = len(data) + SocketConfig.len_header + len(SocketConfig.start_flag)
         self.traffic_counter_to[name] += msg_len
         self.send_locks[name].release()

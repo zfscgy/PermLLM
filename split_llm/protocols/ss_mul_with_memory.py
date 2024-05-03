@@ -139,7 +139,7 @@ class SS_Mul__AppendingX(Protocol):
 
 
             x0_sub_u0_appended, y0_sub_v0 = self.node_1.fetch(self.node_0.name, f"{self.name}:x0-u0 appended, y0-v0")
-            if f"{self.name}:x-u" not in self.node_0.storage:
+            if f"{self.name}:x-u" not in self.node_1.storage:
                 self.node_1.storage[f"{self.name}:x-u"] = x1_sub_u1_appended + x0_sub_u0_appended
             else:
                 self.node_1.storage[f"{self.name}:x-u"] = torch.cat([

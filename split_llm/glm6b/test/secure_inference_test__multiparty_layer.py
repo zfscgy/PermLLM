@@ -119,7 +119,7 @@ def test_layer():
 
     print("-------------Output --------------")
     mpc_out = n0.storage[f"{protocol_name}:z0"] + n1.storage[f"{protocol_name}:z1"]
-    print(f"Error rate of mpc: {relative_error(mpc_out, expected_out):.4f}")
+    print(f"Error rate of mpc: {relative_error(mpc_out, expected_out):.5f}")
 
 
 if __name__ == "__main__":

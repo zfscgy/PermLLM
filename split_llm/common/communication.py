@@ -90,7 +90,9 @@ class Node:
 
     @staticmethod
     def from_remote_name(name: str):
-        return Node(None, name)
+        virtual_node = Node(None, name)
+        virtual_node.storage = None
+        return virtual_node
 
     def local(self):
         """

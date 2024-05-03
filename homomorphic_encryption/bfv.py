@@ -86,4 +86,18 @@ if __name__ == "__main__":
         np.set_printoptions(precision=4, suppress=True)
         print(np.array(bfv.decrypt(d)))
 
-    test_BFV()
+    @test_func
+    def test_serialize():
+        bfv = BFV()
+        
+        bfv2 = BFV.from_bytes(bfv.serialize())
+
+        ct = bfv2.enc_vector([1926, 817])
+        serialized_ct = ct.serialize()
+        
+        restored_ct = ts.bfv_vector_from(bfv.context, serialized_ct)
+        recovered_pt = bfv.decrypt(restored_ct)
+        print(recovered_pt)
+
+
+    test_serialize()
