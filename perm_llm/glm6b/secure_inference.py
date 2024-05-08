@@ -8,15 +8,15 @@ from torch import nn
 import torch.nn.functional as F
 
 
-from split_llm.common.communication import Node
-from split_llm.protocols.base import Protocol
-from split_llm.protocols.base_protocols import SS_Mul__CX_N0_Y_N1, SS_Mul__CX_N0, SS_Perm
-from split_llm.protocols.ss_mul_with_memory import SS_Mul__AppendingX
-from split_llm.protocols.element_wise import SS_ElementWise__RandPerm
-from split_llm.glm6b.wrapped_layer import Attention_GLM_Wrapped, GLMPositionalEmbedding, FeedForward_GLM_Wrapped
-from split_llm.glm6b.utils import generate_position_ids
+from perm_llm.common.communication import Node
+from perm_llm.protocols.base import Protocol
+from perm_llm.protocols.base_protocols import SS_Mul__CX_N0_Y_N1, SS_Mul__CX_N0, SS_Perm
+from perm_llm.protocols.ss_mul_with_memory import SS_Mul__AppendingX
+from perm_llm.protocols.element_wise import SS_ElementWise__RandPerm
+from perm_llm.glm6b.wrapped_layer import Attention_GLM_Wrapped, GLMPositionalEmbedding, FeedForward_GLM_Wrapped
+from perm_llm.glm6b.utils import generate_position_ids
 
-from split_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
+from perm_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
 
 
 from homomorphic_encryption.bfv import BFV
@@ -161,7 +161,9 @@ class GLM_AttentionProtocol(Protocol):
         self.next_lengths.insert(0, next_length)
 
         self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
-        self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], [next_length, self.total_length, 1, GLMConfig.n_heads], next_length)
+        self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 
+                                                  [next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 
+                                                  [next_length, self.total_length, 1, GLMConfig.n_heads], next_length)
 
         if self.n0.local():
             perm_key = np.random.randint(2 ** 30)
@@ -170,7 +172,9 @@ class GLM_AttentionProtocol(Protocol):
 
         self.softmax_protocol.offline_execute([next_length * GLMConfig.n_heads * 1, self.total_length])
         self.weighted_sum_protocol.offline_execute([next_length, self.total_length, 1, GLMConfig.n_heads], [next_length, 1, GLMConfig.model_dim], next_length)
-        self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim])
+        self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], 
+                                               [next_length, 1, GLMConfig.model_dim], 
+                                               [next_length, 1, GLMConfig.model_dim])
 
     def online_step_qkv(self):
         """
@@ -361,6 +365,12 @@ class GLM_AttentionProtocol(Protocol):
             del self.n1.storage[f"{self.name}:s1"], self.n1.storage[f"{self.name}:h1"]
             del self.n1.storage[f"{self.name}:z1"]
 
+    def reset(self):
+        self.qkv_mul_protocol.reset()
+        self.dot_product_protocol.reset()
+        self.softmax_protocol.reset()
+        self.weighted_sum_protocol.reset()
+        self.attn_out_protocol.reset()
 
 
 class GLM_FeedForwardProtocol_PlainWeights(Protocol):
@@ -606,6 +616,11 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             del self.n1.storage[f"{self.name}:x1"]
             del self.n1.storage[f"{self.name}:z1"]
 
+    def reset(self):
+        self.layernorm_in_protocol.reset()
+        self.gelu_protocol.reset()
+        self.layernorm_out_protocol.reset()
+
 
 class GLM_TransformerLayerProtocol(Protocol):
     mask_scale_keys = GLM_AttentionProtocol.mask_scale_keys + GLM_FeedForwardProtocol_PlainWeights.mask_scale_keys
@@ -680,6 +695,10 @@ class GLM_TransformerLayerProtocol(Protocol):
         if self.n1.local():
             del self.n1.storage[f"{self.name}:x1"]
             del self.n1.storage[f"{self.name}:z1"]
+    
+    def reset(self):
+        self.attn_protocol.reset()
+        self.ff_protocol.reset()
 
 
 class GLM_PredictionProtocol(Protocol):
@@ -820,6 +839,10 @@ class GLM_PredictionProtocol(Protocol):
         
         if self.n1.local():
             del self.n1.storage[f"{self.name}:x1"], self.n1.storage[f"{self.name}:z"]
+    
+    def reset(self):
+        self.prediction_dense_protocol.reset()
+        self.randperm_protocol.reset()
 
 
 class GLM_EmbeddingRetrievalProtocol(Protocol):
@@ -901,6 +924,8 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
             del self.n1.storage[f"{self.name}:x"]
             del self.n1.storage[f"{self.name}:z1"]
 
+    def reset(self):
+        self.onehot_matmul_protocol.reset()
 
 class GLM_Protocol(Protocol):
     def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, max_generation_length: int, name: str = None, device: str = "cpu"):
@@ -995,3 +1020,9 @@ class GLM_Protocol(Protocol):
     def clear_io(self):
         if self.n1.local():
             del self.n1.storage[f"{self.name}:x"], self.n1.storage[f"{self.name}:z"]
+
+    def reset(self):
+        self.embedding_retrieval_protocol.reset()
+        self.prediction_protocol.reset()
+        for lp in self.layer_protocols:
+            lp.reset()
