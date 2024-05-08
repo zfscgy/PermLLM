@@ -6,7 +6,7 @@ import tenseal.sealapi as seal
 
 import threading
 
-from split_llm.common.utils import test_func
+from perm_llm.common.utils import test_func
 
 
 class BFV:

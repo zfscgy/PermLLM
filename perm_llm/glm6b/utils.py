@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 
-from split_llm.common.torch_utils import inverse_permutation
+from perm_llm.common.torch_utils import inverse_permutation
 
 
 def generate_position_ids(input_seq_len: int, current_total_len: int):

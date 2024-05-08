@@ -1,4 +1,4 @@
-from typing import Any, Tuple, List
+from typing import Any, Tuple, List, Dict
 import types
 
 import torch
@@ -56,7 +56,7 @@ class SimulatedCommunication(Communication):
     def __init__(self, roles: List[str]):
         self.roles = roles
 
-        self.comm_history: List[List[dict]] = []
+        self.comm_history: Dict[str, List[dict]] = dict()
         self.communication_buffer = dict()
         self.current_stage = -1
         self.stage_names = []
@@ -64,12 +64,12 @@ class SimulatedCommunication(Communication):
     def new_stage(self, name: str):
         self.current_stage += 1
         self.stage_names.append(name)
-        self.comm_history.append([])
+        self.comm_history[name] = []
 
     def send(self, from_role: str, to_role: str, message: Any, header: str):
         msg_size = estimate_size(message)
         self.communication_buffer[f"{from_role}-{to_role}-{header}"] = message
-        self.comm_history[self.current_stage].append({
+        self.comm_history[self.stage_names[self.current_stage]].append({
             "from": from_role,
             "to": to_role,
             "header": header,

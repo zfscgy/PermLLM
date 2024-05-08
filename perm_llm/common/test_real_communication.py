@@ -12,13 +12,13 @@ import torch
 import numpy as np
 from typing import List, Dict
 from simple_socket.zf_socket import SocketServer
-from split_llm.common.utils import test_func
-from split_llm.common.real_communication import RealCommunication
+from perm_llm.common.utils import test_func
+from perm_llm.common.real_communication import RealCommunication
 
 @test_func
 def test_send_receive():
-    sock0 = SocketServer("127.0.0.1:4001", {"127.0.0.1:4002": "p1"}, timeout=2)
-    sock1 = SocketServer("127.0.0.1:4002", {"127.0.0.1:4001": "p0"}, timeout=2)
+    sock0 = SocketServer("127.0.0.1:4001", {"127.0.0.1:4002": "p1"}, timeout=15)
+    sock1 = SocketServer("127.0.0.1:4002", {"127.0.0.1:4001": "p0"}, timeout=15)
     
     time.sleep(1) # Wait the server to start listening
 

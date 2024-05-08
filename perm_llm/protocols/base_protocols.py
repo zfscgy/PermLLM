@@ -418,10 +418,12 @@ if __name__ == "__main__":
         print("----------Storage (after clear IO)-----------")
         protocol.clear_io()
         print(n0.storage)
-        print(n1.storage)    
+        print(n1.storage) 
+
+        protocol.reset()   
 
 
 
-    test__SS_Mul__CX_N0_Y_N1()
-    test__SS_Mul__CX_N0()
+    # test__SS_Mul__CX_N0_Y_N1()
+    # test__SS_Mul__CX_N0()
     test__SS_Perm()

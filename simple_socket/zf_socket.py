@@ -3,6 +3,8 @@ import socket
 import threading
 import logging
 
+from io import BytesIO
+
 
 logger = logging.getLogger("Socket")
 
@@ -10,7 +12,7 @@ logger = logging.getLogger("Socket")
 class SocketConfig:
     start_flag = b'ZFCommProtocol v2024.04.25'
     len_header = 6
-    buffer_size = 128 * (1024 ** 2)
+    buffer_size = 1024 * 1024
 
 
 class SocketException(Exception):
@@ -33,10 +35,11 @@ def read_socket(s: socket.socket) -> bytes:
 
         content_len = int.from_bytes(len_bytes, byteorder='big')
         logger.debug("Get message size %d" % content_len)
-        received_content = bytes()
-        while len(received_content) < content_len:
-            received_content += s.recv(min(SocketConfig.buffer_size, content_len - len(received_content)))
-        return received_content
+        received_content = BytesIO()
+        while received_content.getbuffer().nbytes < content_len:
+            received_content.write(s.recv(min(SocketConfig.buffer_size, content_len - received_content.getbuffer().nbytes)))
+        received_content.seek(0)
+        return received_content.read()
     except Exception as e:
         raise SocketException(f"Socket read error: {e}")
 

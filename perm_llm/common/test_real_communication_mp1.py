@@ -12,9 +12,8 @@ import torch
 import numpy as np
 from typing import List, Dict
 from simple_socket.zf_socket import SocketServer
-from split_llm.common.utils import test_func
-from split_llm.common.real_communication import RealCommunication
-
+from perm_llm.common.utils import test_func
+from perm_llm.common.real_communication import RealCommunication
 
 @test_func
 def receive():

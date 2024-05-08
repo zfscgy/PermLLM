@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from functools import partial
 
 from llm_bases.chatglm6b_official.modeling_chatglm import GLMBlock
-from split_llm.common.torch_utils import copy_param
-from split_llm.glm6b.utils import rotate_half, gelu_openai
+from perm_llm.common.torch_utils import copy_param
+from perm_llm.glm6b.utils import rotate_half, gelu_openai
 
 
 class GLMPositionalEmbedding(nn.Module):

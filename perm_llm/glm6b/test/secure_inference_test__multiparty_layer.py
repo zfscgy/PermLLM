@@ -5,12 +5,12 @@ import time
 import torch
 
 from simple_socket.zf_socket import SocketServer
-from split_llm.common.communication import Node
-from split_llm.common.real_communication import RealCommunication
-from split_llm.common.torch_utils import relative_error
-from split_llm.glm6b.wrapped_layer import Attention_GLM_Wrapped, FeedForward_GLM_Wrapped
-from split_llm.glm6b.utils import generate_position_ids
-from split_llm.glm6b.secure_inference import GLM_TransformerLayerProtocol
+from perm_llm.common.communication import Node
+from perm_llm.common.real_communication import RealCommunication
+from perm_llm.common.torch_utils import relative_error
+from perm_llm.glm6b.wrapped_layer import Attention_GLM_Wrapped, FeedForward_GLM_Wrapped
+from perm_llm.glm6b.utils import generate_position_ids
+from perm_llm.glm6b.secure_inference import GLM_TransformerLayerProtocol
 
 
 def test_layer():

@@ -168,13 +168,15 @@ class SS_Mul__AppendingX(Protocol):
 
     def reset(self):
         if self.node_0.local():
-            self.node_0.storage.clear()
+            self.node_0.storage[f"{self.name}:beaver_u0 appended, v0, w0"].clear()
+            del self.node_0.storage[f"{self.name}:beaver_u0"], self.node_0.storage[f"{self.name}:x-u"]
         
         if self.node_1.local():
-            self.node_1.storage.clear()
+            self.node_1.storage[f"{self.name}:beaver_u1 appended, v1, w1"].clear()
+            del self.node_1.storage[f"{self.name}:beaver_u1"], self.node_1.storage[f"{self.name}:x-u"]
 
         if self.node_2.local():
-            self.node_2.storage.clear()
+            del self.node_2.storage[f"{self.name}:beaver_u"]
 
 if __name__ == "__main__":
     def test__SS_Mul__AppendingX():

@@ -57,7 +57,7 @@ class GLM_AttentionProtocol(Protocol):
                        "softmax/x", "softmax/z", 
                        "weighted_sum/u", "weighted_sum/v", "weighted_sum/w",
                        "attn_out/u", "attn_out/v", "attn_out/w"]
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
         """
         mask_scale keys (description): 
             qkv/u (h), qkv/v (qkv_weight), qkv/w
@@ -70,9 +70,7 @@ class GLM_AttentionProtocol(Protocol):
         self.n1 = n1
         self.n2 = n2
         self.layer = layer
-    
 
-        self.max_generation_length = max_generation_length
 
         if not isinstance(mask_scale, dict):
             mask_scale = {k: mask_scale for k in self.mask_scale_keys}
@@ -108,7 +106,7 @@ class GLM_AttentionProtocol(Protocol):
                 break
 
         self.dot_product_protocol = SS_Mul__AppendingX(
-            [self.max_generation_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 0, 
+            0, 
             (lambda k, q: local_node.space.attentions[layer].generate_logit_scores(q, k)),
             self.dot_product_name, 
             n0, n1, n2,
@@ -123,7 +121,7 @@ class GLM_AttentionProtocol(Protocol):
         )
 
         self.weighted_sum_protocol = SS_Mul__AppendingX(
-            [self.max_generation_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 0,
+            0,
             (lambda v, score: local_node.space.attentions[self.layer].generate_weighted_values(score, v)),
             self.weighted_sum_name,
             n0, n1, n2,
@@ -163,7 +161,7 @@ class GLM_AttentionProtocol(Protocol):
         self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
         self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 
                                                   [next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 
-                                                  [next_length, self.total_length, 1, GLMConfig.n_heads], next_length)
+                                                  [next_length, self.total_length, 1, GLMConfig.n_heads])
 
         if self.n0.local():
             perm_key = np.random.randint(2 ** 30)
@@ -171,10 +169,12 @@ class GLM_AttentionProtocol(Protocol):
             self.n0.storage[f"{self.softmax_name}:new_invperm"] = perm_key
 
         self.softmax_protocol.offline_execute([next_length * GLMConfig.n_heads * 1, self.total_length])
-        self.weighted_sum_protocol.offline_execute([next_length, self.total_length, 1, GLMConfig.n_heads], [next_length, 1, GLMConfig.model_dim], next_length)
-        self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], 
-                                               [next_length, 1, GLMConfig.model_dim], 
-                                               [next_length, 1, GLMConfig.model_dim])
+        self.weighted_sum_protocol.offline_execute(
+            [next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim],
+            [next_length, self.total_length, 1, GLMConfig.n_heads], 
+            [next_length, 1, GLMConfig.model_dim])
+        
+        self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim])
 
     def online_step_qkv(self):
         """
@@ -371,6 +371,7 @@ class GLM_AttentionProtocol(Protocol):
         self.softmax_protocol.reset()
         self.weighted_sum_protocol.reset()
         self.attn_out_protocol.reset()
+        self.total_length = 0
 
 
 class GLM_FeedForwardProtocol_PlainWeights(Protocol):
@@ -379,14 +380,12 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
         "gelu/x", "gelu/z", 
         "layernorm_out/x", "layernorm_out/z" 
     ]
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
         self.layer = layer
     
-
-        self.max_generation_length = max_generation_length
 
         if not isinstance(mask_scale, dict):
             mask_scale = {k: mask_scale for k in self.mask_scale_keys}
@@ -624,14 +623,13 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
 
 class GLM_TransformerLayerProtocol(Protocol):
     mask_scale_keys = GLM_AttentionProtocol.mask_scale_keys + GLM_FeedForwardProtocol_PlainWeights.mask_scale_keys
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, max_generation_length: int = 500, name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
         self.layer = layer
     
 
-        self.max_generation_length = max_generation_length
         self.mask_scale = mask_scale
 
         self.device = device
@@ -641,8 +639,8 @@ class GLM_TransformerLayerProtocol(Protocol):
         self.attn_name = f"{self.name}/attn"
         self.ff_name = f"{self.name}/ff"
 
-        self.attn_protocol = GLM_AttentionProtocol(n0, n1, n2, layer, mask_scale, max_generation_length, self.attn_name, device)
-        self.ff_protocol = GLM_FeedForwardProtocol_PlainWeights(n0, n1, n2, layer, mask_scale, max_generation_length, self.ff_name, device)
+        self.attn_protocol = GLM_AttentionProtocol(n0, n1, n2, layer, mask_scale, self.attn_name, device)
+        self.ff_protocol = GLM_FeedForwardProtocol_PlainWeights(n0, n1, n2, layer, mask_scale, self.ff_name, device)
 
     def prepare(self):
         self.attn_protocol.prepare()
@@ -928,7 +926,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
         self.onehot_matmul_protocol.reset()
 
 class GLM_Protocol(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, max_generation_length: int, name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -957,7 +955,7 @@ class GLM_Protocol(Protocol):
 
         self.layer_names = [f"transformer_layer_{i}" for i in range(28)]
         self.layer_protocols = [
-            GLM_TransformerLayerProtocol(n0, n1, n2, i, get_sub_dict(mask_scale, f"transformer_layer_{i}/"), max_generation_length, self.layer_names[i], device)
+            GLM_TransformerLayerProtocol(n0, n1, n2, i, get_sub_dict(mask_scale, f"transformer_layer_{i}/"), self.layer_names[i], device)
             for i in range(GLMConfig.n_layers)
         ]
         

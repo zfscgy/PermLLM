@@ -4,7 +4,7 @@ import torch
 from torch import nn
 
 
-from split_llm.common.utils import test_func
+from perm_llm.common.utils import test_func
 
 
 def copy_param(param_from: nn.Parameter, param_to: nn.Parameter):
