@@ -10,3 +10,7 @@ class Protocol:
     
     def clear_io(self):
         raise NotImplementedError()
+    
+    def reset(self):
+        # To clear all offline caches
+        raise NotImplementedError()

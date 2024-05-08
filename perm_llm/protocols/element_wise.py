@@ -2,11 +2,11 @@ from typing import Callable, Union, Dict
 
 import torch
 
-from split_llm.common.communication import Communication, Node, SimulatedCommunication
-from split_llm.protocols.base_protocols import SS_Perm
-from split_llm.protocols.base import Protocol
+from perm_llm.common.communication import Communication, Node, SimulatedCommunication
+from perm_llm.protocols.base_protocols import SS_Perm
+from perm_llm.protocols.base import Protocol
 
-from split_llm.common.utils import test_func
+from perm_llm.common.utils import test_func
 
 
 class SS_ElementWise__RandPerm(Protocol):
@@ -113,6 +113,9 @@ class SS_ElementWise__RandPerm(Protocol):
         if self.node_1.local():
             del self.node_1.storage[f"{self.name}:x1"], self.node_1.storage[f"{self.name}:z1"]
 
+    def reset(self):
+        self.perm_protocol.reset()
+        self.invperm_protocol.reset()
 
 
 if __name__ == "__main__":

@@ -5,10 +5,10 @@ import threading
 import torch
 
 from simple_socket.zf_socket import SocketServer
-from split_llm.common.communication import Node
-from split_llm.common.real_communication import RealCommunication
-from split_llm.protocols.base_protocols import SS_Mul__CX_N0_Y_N1
-from split_llm.common.utils import test_func
+from perm_llm.common.communication import Node
+from perm_llm.common.real_communication import RealCommunication
+from perm_llm.protocols.base_protocols import SS_Mul__CX_N0_Y_N1
+from perm_llm.common.utils import test_func
 
 
 

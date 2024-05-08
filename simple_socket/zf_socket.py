@@ -3,12 +3,14 @@ import socket
 import threading
 import logging
 
+
 logger = logging.getLogger("Socket")
 
 
 class SocketConfig:
     start_flag = b'ZFCommProtocol v2024.04.25'
     len_header = 6
+    buffer_size = 128 * (1024 ** 2)
 
 
 class SocketException(Exception):
@@ -20,7 +22,6 @@ class SocketException(Exception):
 
 
 def read_socket(s: socket.socket) -> bytes:
-    buffer_size = 1000_000  # Send 1Mb data at max each time
     try:
         flag = s.recv(len(SocketConfig.start_flag))
         if flag != SocketConfig.start_flag:
@@ -34,23 +35,22 @@ def read_socket(s: socket.socket) -> bytes:
         logger.debug("Get message size %d" % content_len)
         received_content = bytes()
         while len(received_content) < content_len:
-            received_content += s.recv(min(buffer_size, content_len - len(received_content)))
-            time.sleep(0.001)
+            received_content += s.recv(min(SocketConfig.buffer_size, content_len - len(received_content)))
         return received_content
     except Exception as e:
         raise SocketException(f"Socket read error: {e}")
 
 
 def write_socket(s: socket.socket, content: bytes):
-    buffer_size = 1000_000  # Send 1Mb data at max each time
     try:
         content_len = len(content) + SocketConfig.len_header + len(SocketConfig.start_flag)
         len_bytes = len(content).to_bytes(SocketConfig.len_header, byteorder='big')
         send_bytes = SocketConfig.start_flag + len_bytes + content
         sent_len = 0
         while sent_len != content_len:
-            end_pos = min(len(send_bytes), sent_len + buffer_size)
-            sent_len += s.send(send_bytes[sent_len: end_pos])
+            end_pos = min(len(send_bytes), sent_len + SocketConfig.buffer_size)
+            current_bytes = send_bytes[sent_len: end_pos]
+            sent_len += s.send(current_bytes)
 
     except Exception as e:
         raise SocketException(f"Socket send error: {e}")
