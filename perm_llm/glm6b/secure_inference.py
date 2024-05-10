@@ -1,6 +1,8 @@
 from typing import Any, List, Dict, Callable, Union
 from functools import partial
 
+import logging
+
 import numpy as np
 
 import torch
@@ -22,6 +24,8 @@ from perm_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
 from homomorphic_encryption.bfv import BFV
 import tenseal as ts
 
+
+logger = logging.getLogger("Socket")
 
 
 class GLMConfig:
@@ -77,8 +81,10 @@ class GLM_AttentionProtocol(Protocol):
         self.mask_scale = mask_scale
 
         self.prompt_length = 0
-        self.total_length = 0
+        self.total_length_offline = 0
+        self.total_length_online = 0
         self.next_lengths = []
+
         self.position_ids = []
         self.positional_embedding = GLMPositionalEmbedding(64).to(device)
 
@@ -148,30 +154,33 @@ class GLM_AttentionProtocol(Protocol):
 
 
     def offline_execute(self, next_length: int):
-        if self.total_length == 0:
+        if self.total_length_offline == 0:
             self.prompt_length = next_length + 1
-            self.total_length = next_length
+            self.total_length_offline = next_length
             self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.prompt_length)[..., :-1].to(self.device))  
             # Notice that the first 'next length' does not include the [start] token.
         else:
-            self.total_length += next_length
-            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length)[..., -next_length:].to(self.device))
+            self.total_length_offline += next_length
+            self.position_ids.insert(0, generate_position_ids(self.prompt_length, self.total_length_offline)[..., -next_length:].to(self.device))
         self.next_lengths.insert(0, next_length)
+
+        if self.layer == 0:
+            pass
 
         self.qkv_mul_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim * 3])
         self.dot_product_protocol.offline_execute([next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 
                                                   [next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim], 
-                                                  [next_length, self.total_length, 1, GLMConfig.n_heads])
+                                                  [next_length, self.total_length_offline, 1, GLMConfig.n_heads])
 
         if self.n0.local():
             perm_key = np.random.randint(2 ** 30)
             self.n0.storage[f"{self.softmax_name}:new_perm"] = perm_key
             self.n0.storage[f"{self.softmax_name}:new_invperm"] = perm_key
 
-        self.softmax_protocol.offline_execute([next_length * GLMConfig.n_heads * 1, self.total_length])
+        self.softmax_protocol.offline_execute([next_length * GLMConfig.n_heads * 1, self.total_length_offline])
         self.weighted_sum_protocol.offline_execute(
             [next_length, 1, GLMConfig.n_heads, GLMConfig.head_dim],
-            [next_length, self.total_length, 1, GLMConfig.n_heads], 
+            [next_length, self.total_length_offline, 1, GLMConfig.n_heads], 
             [next_length, 1, GLMConfig.model_dim])
         
         self.attn_out_protocol.offline_execute([next_length, 1, GLMConfig.model_dim], [next_length, 1, GLMConfig.model_dim])
@@ -250,7 +259,7 @@ class GLM_AttentionProtocol(Protocol):
         self.dot_product_protocol.clear_io()
 
 
-    def online_step_softmax(self):
+    def online_step_softmax(self, current_next_length: int):
         """
         Input: [q_len, k_len, 1, n_heads]
             Node 0: s0
@@ -261,22 +270,21 @@ class GLM_AttentionProtocol(Protocol):
         """
         # In node_0
         if self.n0.local():
-            self.n0.storage[f"{self.softmax_name}:x0"] = self.n0.storage[f"{self.name}:s0"].swapaxes(1, 3).reshape(-1, self.total_length)
+            self.n0.storage[f"{self.softmax_name}:x0"] = self.n0.storage[f"{self.name}:s0"].swapaxes(1, 3).reshape(-1, self.total_length_online)
         # In node_1
         if self.n1.local():
-            self.n1.storage[f"{self.softmax_name}:x1"] = self.n1.storage[f"{self.name}:s1"].swapaxes(1, 3).reshape(-1, self.total_length)
+            self.n1.storage[f"{self.softmax_name}:x1"] = self.n1.storage[f"{self.name}:s1"].swapaxes(1, 3).reshape(-1, self.total_length_online)
 
         self.softmax_protocol.online_execute()
 
-        current_next_length = self.next_lengths.pop()
         # In node_0
         if self.n0.local():
             self.n0.storage[f"{self.name}:s0"] = \
-                self.n0.storage[f"{self.softmax_name}:z0"].view(current_next_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
+                self.n0.storage[f"{self.softmax_name}:z0"].view(current_next_length, GLMConfig.n_heads, 1, self.total_length_online).swapaxes(1, 3)
         # In node_1
         if self.n1.local():
             self.n1.storage[f"{self.name}:s1"] = \
-                self.n1.storage[f"{self.softmax_name}:z1"].view(current_next_length, GLMConfig.n_heads, 1, self.total_length).swapaxes(1, 3)
+                self.n1.storage[f"{self.softmax_name}:z1"].view(current_next_length, GLMConfig.n_heads, 1, self.total_length_online).swapaxes(1, 3)
         
         self.softmax_protocol.clear_io()
 
@@ -346,9 +354,11 @@ class GLM_AttentionProtocol(Protocol):
             Node 1: z1
         """
 
+        next_length = self.next_lengths.pop()
+        self.total_length_online += next_length
         self.online_step_qkv()
         self.online_step_dot_product()
-        self.online_step_softmax()
+        self.online_step_softmax(next_length)
         self.online_step_weighted_v()
         self.online_step_attn_out()
 
@@ -371,7 +381,10 @@ class GLM_AttentionProtocol(Protocol):
         self.softmax_protocol.reset()
         self.weighted_sum_protocol.reset()
         self.attn_out_protocol.reset()
-        self.total_length = 0
+        self.total_length_offline = 0
+        self.total_length_online = 0
+        self.next_lengths.clear()
+        self.position_ids.clear()
 
 
 class GLM_FeedForwardProtocol_PlainWeights(Protocol):
@@ -924,6 +937,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
 
     def reset(self):
         self.onehot_matmul_protocol.reset()
+        self.layernorm_in_protocol.reset()
 
 class GLM_Protocol(Protocol):
     def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, name: str = None, device: str = "cpu"):

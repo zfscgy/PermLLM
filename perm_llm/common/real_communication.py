@@ -21,11 +21,10 @@ class WrappedTorchTensor:
 
 
 class RealCommunication(Communication):
-    def __init__(self, roles: List[str], socket_server_map: Dict[str, SocketServer], tensor_device: str="cpu"):
+    def __init__(self, socket_server_map: Dict[str, SocketServer], tensor_device: str="cpu"):
         """
         The socket server is expected to be connected
         """
-        self.roles = roles
         self.socket_server_map = socket_server_map
 
         self.current_stage = -1
@@ -33,6 +32,11 @@ class RealCommunication(Communication):
         self.comm_history: List[List[dict]] = []
 
         self.tensor_device = tensor_device
+
+        # Those two fields are used to add additional time to the send method
+        # Using it only for LAN! And watch out for timeout.
+        self.latency_ms = None
+        self.bandwidth_mbps = None
 
     def wrap_object(self, obj: Any):
         """
@@ -61,11 +65,21 @@ class RealCommunication(Communication):
         self.current_stage += 1
         self.stage_names.append(name)
         self.comm_history.append([])
+    
+    def simulate_network(self, latency_ms: float, bandwith_mbps: float):
+        self.latency_ms = latency_ms
+        self.bandwidth_mbps = bandwith_mbps
 
     def send(self, from_role: str, to_role: str, message: Any, header: str):
         wrapped_message = (header, self.wrap_object(message))
         dumped = pickle.dumps(wrapped_message)
         self.socket_server_map[from_role].send_to(to_role, dumped)
+
+        # Simulate the latency and bandwith when in LAN
+        if self.latency_ms is not None:
+            time.sleep(self.latency_ms / 1000)
+        if self.bandwidth_mbps is not None:
+            time.sleep(len(dumped) / ((self.bandwidth_mbps * 1024 ** 2) / 8))
 
         self.comm_history.append({
             "from": from_role,

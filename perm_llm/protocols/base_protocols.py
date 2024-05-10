@@ -88,7 +88,7 @@ class SS_Mul__CX_N0_Y_N1(Protocol):
             w1 = self.node_1.fetch(self.node_2.name, f"{self.name}:beaver_w1")
             self.node_1.enqueue(f"{self.name}:z1_cache", self.f_mul(
                 self.node_1.storage[f"{self.name}:x-u"], 
-                self.node_1.storage[f"{self.name}:beaver_v"][-1]) + w1)
+                self.node_1.storage[f"{self.name}:beaver_v"][0]) + w1)
 
         if self.node_0.local():
             # In node_0

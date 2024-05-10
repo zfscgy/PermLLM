@@ -25,8 +25,8 @@ def test_send_receive():
     sock0.connect_all()
     sock1.connect_all()
     
-    comm0 = RealCommunication(["p0", "p1"], {"p0": sock0})
-    comm1 = RealCommunication(["p0", "p1"], {"p1": sock1})
+    comm0 = RealCommunication({"p0": sock0})
+    comm1 = RealCommunication({"p1": sock1})
 
     send_th = threading.Thread(target=comm0.send, args=("p0", "p1", 1926.0817 * torch.ones(4096, 100000), "tensor"))
     send_th.start()

@@ -1,3 +1,5 @@
+from typing import Dict
+
 import time
 import socket
 import threading
@@ -83,8 +85,8 @@ class SocketServer:
         logger.debug("Default timeout set to %d" % timeout)
         socket.setdefaulttimeout(timeout)
         self.other_addrs = other_addrs
-        self.other_recv_sockets = dict()
-        self.other_send_sockets = dict()
+        self.other_recv_sockets: Dict[str, socket.socket] = dict()
+        self.other_send_sockets: Dict[str, socket.socket] = dict()
         self.send_locks = dict()
         self.waiting_for_connection = True
 
@@ -96,8 +98,10 @@ class SocketServer:
         self.traffic_counter_from = dict()
 
     def set_timeout(self, timeout: float):
-        logger.debug("Default timeout set to %d" % timeout)
-        socket.setdefaulttimeout(timeout)
+        logger.debug("Timeout set to %d" % timeout)
+        for sock in self.other_recv_sockets.values() + self.other_send_sockets.values():
+            sock: socket.socket
+            sock.settimeout(timeout)
 
     def _listen_loop(self):
         self.socket.listen()
