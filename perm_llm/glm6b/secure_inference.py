@@ -954,7 +954,7 @@ class GLM_Protocol(Protocol):
             for layer in range(GLMConfig.n_layers):  # there are total 28 layers in GLM
                 mask_scale_dict.update({f"transformer_layer_{layer}/" + k: mask_scale for k in GLM_TransformerLayerProtocol.mask_scale_keys})
 
-        mask_scale = mask_scale_dict
+            mask_scale = mask_scale_dict
 
         self.mask_scale = mask_scale
 
