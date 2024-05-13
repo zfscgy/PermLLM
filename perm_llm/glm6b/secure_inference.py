@@ -21,7 +21,7 @@ from perm_llm.glm6b.utils import generate_position_ids
 from perm_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
 
 
-from homomorphic_encryption.bfv import BFV
+from homomorphic_encryption.bfv_tenseal import BFV
 import tenseal as ts
 
 
