@@ -21,8 +21,8 @@ from perm_llm.glm6b.utils import generate_position_ids
 from perm_llm.common.torch_utils import permute_2d_with_seed, permute_with_seed
 
 
-from homomorphic_encryption.bfv_tenseal import BFV
-import tenseal as ts
+from homomorphic_encryption.bfv_pyfhel import BFV
+# import tenseal as ts
 
 
 logger = logging.getLogger("Socket")
@@ -766,7 +766,7 @@ class GLM_PredictionProtocol(Protocol):
 
         # In node_0
         if self.n0.local():
-            self.n0.storage['bfv_cryptosystem'] = BFV.from_bytes(self.n0.fetch(self.n1.name, f"{self.name}:bfv_keys"))
+            self.n0.storage['bfv_cryptosystem'] = BFV.from_bytes(*self.n0.fetch(self.n1.name, f"{self.name}:bfv_keys"))
 
     def offline_execute(self):
         self.prediction_dense_protocol.offline_execute([GLMConfig.model_dim], [GLMConfig.n_tokens])
@@ -811,31 +811,27 @@ class GLM_PredictionProtocol(Protocol):
             best_idx = np.argmax(permuted_scores.tolist())
             indicator = np.zeros([GLMConfig.n_tokens], dtype=int)
             indicator[best_idx] = 1
-            step_size = self.n1.storage['bfv_cryptosystem'].ciphertext_size
             indicator_cts = []
-            for i in range(0, GLMConfig.n_tokens, step_size):
-                indicator_cts.append(self.n1.storage['bfv_cryptosystem'].enc_vector(indicator[i: i + step_size]))
-            self.n1.send(self.n0.name, f"{self.name}:index_indicator_ct", [c.serialize() for c in indicator_cts])
-            del permuted_scores, best_idx, indicator, step_size, indicator_cts
+            indicator_cts = self.n1.storage['bfv_cryptosystem'].encrypt_vector(indicator)
+            self.n1.send(self.n0.name, f"{self.name}:index_indicator_ct", [self.n1.storage['bfv_cryptosystem'].serialize_ciphertext(c) for c in indicator_cts])
+            del permuted_scores, best_idx, indicator, indicator_cts
 
         # In node_0
         if self.n0.local():
+            bfv: BFV = self.n0.storage['bfv_cryptosystem']
             indicator_ct_bytes: List[bytes] = self.n0.fetch(self.n1.name, f"{self.name}:index_indicator_ct")
-            indicator_cts = [ts.bfv_vector_from(self.n0.storage['bfv_cryptosystem'].context, b) for b in indicator_ct_bytes]
-            index_cts = []
-            step_size = self.n0.storage['bfv_cryptosystem'].ciphertext_size
-            for i in range(0, GLMConfig.n_tokens, step_size):
-                index_cts.append(indicator_cts[i // step_size].dot(self.n0.storage[f"{self.name}:current_permutation"] [i:i + step_size]))        
-            index_ct: ts.BFVVector = sum(index_cts[1:], start=index_cts[0])
-        
-            self.n0.send(self.n1.name, f"{self.name}:index__ct", index_ct.serialize())
+            indicator_cts = [bfv.ciphertext_from_bytes(b) for b in indicator_ct_bytes]
+            index_pts = bfv.encode_vector(np.array(self.n0.storage[f"{self.name}:current_permutation"]))
+            index_ct = bfv.cp_dot(indicator_cts, index_pts)
+    
+            self.n0.send(self.n1.name, f"{self.name}:index__ct", bfv.serialize_ciphertext(index_ct))
 
-            del indicator_ct_bytes, indicator_cts, index_cts, index_ct
+            del bfv, indicator_ct_bytes, indicator_cts, index_ct
 
         # In node_1
         if self.n1.local():
-            index_ct = ts.bfv_vector_from(self.n1.storage['bfv_cryptosystem'].context, self.n1.fetch(self.n0.name, f"{self.name}:index__ct"))
-            index = self.n1.storage['bfv_cryptosystem'].decrypt(index_ct)
+            index_ct = self.n1.storage['bfv_cryptosystem'].ciphertext_from_bytes(self.n1.fetch(self.n0.name, f"{self.name}:index__ct"))
+            index = self.n1.storage['bfv_cryptosystem'].decrypt(index_ct)[0]
             self.n1.storage[f"{self.name}:z"] = index
 
             del index_ct, index
