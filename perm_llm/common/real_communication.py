@@ -18,8 +18,6 @@ class WrappedTorchTensor:
     data: np.ndarray
     dtype: torch.dtype
 
-
-
 class RealCommunication(Communication):
     def __init__(self, socket_server_map: Dict[str, SocketServer], tensor_device: str="cpu"):
         """
@@ -27,9 +25,12 @@ class RealCommunication(Communication):
         """
         self.socket_server_map = socket_server_map
 
+        self.pending_blocking_sends: Dict[str, threading.Thread] = dict()
+
         self.current_stage = -1
         self.stage_names = []
-        self.comm_history: List[List[dict]] = []
+        self.comm_history: Dict[str, List[dict]] = dict()
+        
 
         self.tensor_device = tensor_device
 
@@ -37,6 +38,12 @@ class RealCommunication(Communication):
         # Using it only for LAN! And watch out for timeout.
         self.latency_ms = None
         self.bandwidth_mbps = None
+        self.new_stage("Default")
+
+    def new_stage(self, name: str):
+        self.current_stage += 1
+        self.stage_names.append(name)
+        self.comm_history[name] = []
 
     def wrap_object(self, obj: Any):
         """
@@ -61,19 +68,17 @@ class RealCommunication(Communication):
         else:
             return obj
 
-    def new_stage(self, name: str):
-        self.current_stage += 1
-        self.stage_names.append(name)
-        self.comm_history.append([])
-    
     def simulate_network(self, latency_ms: float, bandwith_mbps: float):
         self.latency_ms = latency_ms
         self.bandwidth_mbps = bandwith_mbps
 
+    def unset_simulation(self):
+        self.latency_ms = None
+        self.bandwidth_mbps = None
+
     def send(self, from_role: str, to_role: str, message: Any, header: str):
         wrapped_message = (header, self.wrap_object(message))
         dumped = pickle.dumps(wrapped_message)
-        self.socket_server_map[from_role].send_to(to_role, dumped)
 
         # Simulate the latency and bandwith when in LAN
         if self.latency_ms is not None:
@@ -81,18 +86,37 @@ class RealCommunication(Communication):
         if self.bandwidth_mbps is not None:
             time.sleep(len(dumped) / ((self.bandwidth_mbps * 1024 ** 2) / 8))
 
-        self.comm_history.append({
+        def blocking_send():
+            self.socket_server_map[from_role].send_to(to_role, dumped)
+            self.comm_history[self.stage_names[-1]].append({
+                "from": from_role,
+                "to": to_role,
+                "time": time.time(),
+                "header": header,
+                "size": len(dumped)
+            })
+
+        if to_role in self.pending_blocking_sends:
+            self.pending_blocking_sends[to_role].join()
+            del self.pending_blocking_sends[to_role]
+
+        send_th = threading.Thread(target=blocking_send)
+        send_th.start()
+        self.pending_blocking_sends[to_role] = send_th
+
+
+    def fetch(self, to_role: str, from_role: str, header: str):
+        msg_data = self.socket_server_map[to_role].recv_from(from_role)
+        received_header, wrapped_obj = pickle.loads(msg_data)
+        if received_header != header:
+            raise AssertionError(f"Unexpected header {received_header}, expecting {header}")
+        self.comm_history[self.stage_names[-1]].append({
             "from": from_role,
             "to": to_role,
             "time": time.time(),
             "header": header,
-            "size": len(dumped)
+            "size": len(msg_data)
         })
-
-    def fetch(self, to_role: str, from_role: str, header: str):
-        received_header, wrapped_obj = pickle.loads(self.socket_server_map[to_role].recv_from(from_role))
-        if received_header != header:
-            raise AssertionError(f"Unexpected header {received_header}, expecting {header}")
         return self.unwrap_object(wrapped_obj)
 
 

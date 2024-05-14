@@ -387,13 +387,15 @@ class GLM_AttentionProtocol(Protocol):
         self.position_ids.clear()
 
 
-class GLM_FeedForwardProtocol_PlainWeights(Protocol):
+class GLM_FeedForwardProtocol(Protocol):
     mask_scale_keys = [
         "layernorm_in/x", "layernorm_in/z", 
         "gelu/x", "gelu/z", 
-        "layernorm_out/x", "layernorm_out/z" 
+        "layernorm_out/x", "layernorm_out/z",
+        "mlp_in/u", "mlp_in/v", "mlp_in/w", 
+        "mlp_out/u", "mlp_out/v", "mlp_out/w" 
     ]
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: Union[float, Dict[str, float]], private_mlp: bool = False, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -412,6 +414,9 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
         self.layernorm_in_name = f"{self.name}/layernorm_in"
         self.gelu_name = f"{self.name}/gelu"
         self.layernorm_out_name = f"{self.name}/layernorm_out"
+        
+        self.mlp_in_name = f"{self.name}/mlp_in"
+        self.mlp_out_name = f"{self.name}/mlp_out"
 
         self.layernorm_in_protocol = SS_ElementWise__RandPerm(
             permute_2d_with_seed, partial(permute_2d_with_seed, reverse=True),
@@ -434,10 +439,37 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             get_sub_dict(mask_scale, "layernorm_out/"), device
         )
 
+
+        if private_mlp:
+            self.mlp_in_protocol = SS_Mul__CX_N0(
+                [GLMConfig.model_dim * 4, GLMConfig.model_dim], (lambda x, y: y @ x.T), 
+                self.mlp_in_name,
+                n0, n1, n2,
+                get_sub_dict(mask_scale, "mlp_in/"), device
+            )
+
+            self.mlp_out_protocol = SS_Mul__CX_N0(
+                [GLMConfig.model_dim, GLMConfig.model_dim * 4], (lambda x, y: y @ x.T), 
+                self.mlp_out_name,
+                n0, n1, n2,
+                get_sub_dict(mask_scale, "mlp_in/"), device
+            )
+
+        self.private_mlp = private_mlp
+
     def prepare(self):
         self.layernorm_in_protocol.prepare()
         self.gelu_protocol.prepare()
         self.layernorm_out_protocol.prepare()
+
+        if self.private_mlp:
+            if self.n0.local():
+                self.n0.storage[f"{self.mlp_in_name}:x"] = self.n0.space.ffs[self.layer].mlp_dense_in.weight
+            self.mlp_in_protocol.prepare()
+
+            if self.n0.local():
+                self.n0.storage[f"{self.mlp_out_name}:x"] = self.n0.space.ffs[self.layer].mlp_dense_out.weight
+            self.mlp_out_protocol.prepare()
 
     def offline_execute(self, next_length: int):
         if self.n0.local():
@@ -451,7 +483,6 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             self.n0.storage[f"{self.gelu_name}:new_perm"] = perm_key
             self.n0.storage[f"{self.gelu_name}:new_invperm"] = perm_key
         self.gelu_protocol.offline_execute([next_length, 4 * GLMConfig.model_dim])
-        
 
         if self.n0.local():
             perm_key = np.random.randint(2 ** 30)
@@ -459,6 +490,9 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             self.n0.storage[f"{self.layernorm_out_name}:new_invperm"] = perm_key
         self.layernorm_out_protocol.offline_execute([next_length, GLMConfig.model_dim])
 
+        if self.private_mlp:
+            self.mlp_in_protocol.offline_execute([next_length, GLMConfig.model_dim], [next_length, 4 * GLMConfig.model_dim])
+            self.mlp_out_protocol.offline_execute([next_length, 4 * GLMConfig.model_dim], [next_length, GLMConfig.model_dim])
 
     def online_step_layernorm_in(self):
         """
@@ -497,15 +531,32 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h_mlp_in_0
             Node 1: h_mlp_in_1
         """
-        if self.n0.local():
-            self.n0.storage[f"{self.name}:h_mlp_in_0"] = \
-                self.n0.storage[f"{self.name}:h_ln_in_0"] @ self.n0.space.ffs[self.layer].mlp_dense_in.weight.T + \
-                self.n0.space.ffs[self.layer].mlp_dense_in.bias
+        if not self.private_mlp:
+            if self.n0.local():
+                self.n0.storage[f"{self.name}:h_mlp_in_0"] = \
+                    self.n0.storage[f"{self.name}:h_ln_in_0"] @ self.n0.space.ffs[self.layer].mlp_dense_in.weight.T + \
+                    self.n0.space.ffs[self.layer].mlp_dense_in.bias
 
-        if self.n1.local():
-            self.n1.storage[f"{self.name}:h_mlp_in_1"] = \
-                self.n1.storage[f"{self.name}:h_ln_in_1"] @ self.n1.space.ffs[self.layer].mlp_dense_in.weight.T
+            if self.n1.local():
+                self.n1.storage[f"{self.name}:h_mlp_in_1"] = \
+                    self.n1.storage[f"{self.name}:h_ln_in_1"] @ self.n1.space.ffs[self.layer].mlp_dense_in.weight.T
         
+        else:
+            if self.n0.local():
+                self.n0.storage[f"{self.mlp_in_name}:y0"] = self.n0.storage[f"{self.name}:h_ln_in_0"]
+            if self.n1.local():
+                self.n1.storage[f"{self.mlp_in_name}:y1"] = self.n1.storage[f"{self.name}:h_ln_in_1"]
+
+            self.mlp_in_protocol.online_execute()
+    
+            if self.n0.local():
+                self.n0.storage[f"{self.name}:h_mlp_in_0"] = self.n0.storage[f"{self.mlp_in_name}:z0"] + self.n0.space.ffs[self.layer].mlp_dense_in.bias
+        
+            if self.n1.local():
+                self.n1.storage[f"{self.name}:h_mlp_in_1"] = self.n1.storage[f"{self.mlp_in_name}:z1"]
+
+            
+
     def online_step_gelu(self):
         """
         Input:
@@ -536,15 +587,29 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
             Node 0: h_mlp_out_0
             Node 1: h_mlp_out_1
         """
+        if not self.private_mlp:
+            if self.n0.local():
+                self.n0.storage[f"{self.name}:h_mlp_out_0"] = \
+                    self.n0.storage[f"{self.name}:h_gelu_0"] @ self.n0.space.ffs[self.layer].mlp_dense_out.weight.T + \
+                    self.n0.space.ffs[self.layer].mlp_dense_out.bias
 
-        if self.n0.local():
-            self.n0.storage[f"{self.name}:h_mlp_out_0"] = \
-                self.n0.storage[f"{self.name}:h_gelu_0"] @ self.n0.space.ffs[self.layer].mlp_dense_out.weight.T + \
-                self.n0.space.ffs[self.layer].mlp_dense_out.bias
+            if self.n1.local():
+                self.n1.storage[f"{self.name}:h_mlp_out_1"] = \
+                    self.n1.storage[f"{self.name}:h_gelu_1"] @ self.n1.space.ffs[self.layer].mlp_dense_out.weight.T
+                
+        else:
+            if self.n0.local():
+                self.n0.storage[f"{self.mlp_out_name}:y0"] = self.n0.storage[f"{self.name}:h_gelu_0"]
+            if self.n1.local():
+                self.n1.storage[f"{self.mlp_out_name}:y1"] = self.n1.storage[f"{self.name}:h_gelu_1"]
 
-        if self.n1.local():
-            self.n1.storage[f"{self.name}:h_mlp_out_1"] = \
-                self.n1.storage[f"{self.name}:h_gelu_1"] @ self.n1.space.ffs[self.layer].mlp_dense_out.weight.T
+            self.mlp_out_protocol.online_execute()
+    
+            if self.n0.local():
+                self.n0.storage[f"{self.name}:h_mlp_out_0"] = self.n0.storage[f"{self.mlp_out_name}:z0"] + self.n0.space.ffs[self.layer].mlp_dense_out.bias
+        
+            if self.n1.local():
+                self.n1.storage[f"{self.name}:h_mlp_out_1"] = self.n1.storage[f"{self.mlp_out_name}:z1"]
         
     def online_step_layernorm_out(self):
         """
@@ -635,8 +700,8 @@ class GLM_FeedForwardProtocol_PlainWeights(Protocol):
 
 
 class GLM_TransformerLayerProtocol(Protocol):
-    mask_scale_keys = GLM_AttentionProtocol.mask_scale_keys + GLM_FeedForwardProtocol_PlainWeights.mask_scale_keys
-    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, name: str = None, device: str = "cpu"):
+    mask_scale_keys = GLM_AttentionProtocol.mask_scale_keys + GLM_FeedForwardProtocol.mask_scale_keys
+    def __init__(self, n0: Node, n1: Node, n2: Node, layer: int, mask_scale: float, private_mlp: bool = False, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -653,7 +718,7 @@ class GLM_TransformerLayerProtocol(Protocol):
         self.ff_name = f"{self.name}/ff"
 
         self.attn_protocol = GLM_AttentionProtocol(n0, n1, n2, layer, mask_scale, self.attn_name, device)
-        self.ff_protocol = GLM_FeedForwardProtocol_PlainWeights(n0, n1, n2, layer, mask_scale, self.ff_name, device)
+        self.ff_protocol = GLM_FeedForwardProtocol(n0, n1, n2, layer, mask_scale, private_mlp=private_mlp, name=self.ff_name, device=device)
 
     def prepare(self):
         self.attn_protocol.prepare()
@@ -936,7 +1001,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
         self.layernorm_in_protocol.reset()
 
 class GLM_Protocol(Protocol):
-    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, name: str = None, device: str = "cpu"):
+    def __init__(self, n0: Node, n1: Node, n2: Node, mask_scale: float, private_mlp: bool = False, name: str = None, device: str = "cpu"):
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
@@ -965,7 +1030,7 @@ class GLM_Protocol(Protocol):
 
         self.layer_names = [f"transformer_layer_{i}" for i in range(28)]
         self.layer_protocols = [
-            GLM_TransformerLayerProtocol(n0, n1, n2, i, get_sub_dict(mask_scale, f"transformer_layer_{i}/"), self.layer_names[i], device)
+            GLM_TransformerLayerProtocol(n0, n1, n2, i, get_sub_dict(mask_scale, f"transformer_layer_{i}/"), private_mlp=private_mlp, name=self.layer_names[i], device=device)
             for i in range(GLMConfig.n_layers)
         ]
         

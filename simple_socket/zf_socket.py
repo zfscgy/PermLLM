@@ -11,6 +11,7 @@ from io import BytesIO
 logger = logging.getLogger("Socket")
 
 
+
 class SocketConfig:
     start_flag = b'ZFCommProtocol v2024.04.25'
     len_header = 6
@@ -84,7 +85,12 @@ class SocketServer:
 
         logger.debug("Default timeout set to %d" % timeout)
         socket.setdefaulttimeout(timeout)
+
+        other_addrs = other_addrs.copy()
+        if address in other_addrs:
+            del other_addrs[address]
         self.other_addrs = other_addrs
+
         self.other_recv_sockets: Dict[str, socket.socket] = dict()
         self.other_send_sockets: Dict[str, socket.socket] = dict()
         self.send_locks = dict()
@@ -96,6 +102,7 @@ class SocketServer:
         # Count traffic from/to
         self.traffic_counter_to = dict()
         self.traffic_counter_from = dict()
+
 
     def set_timeout(self, timeout: float):
         logger.debug("Timeout set to %d" % timeout)
@@ -114,6 +121,7 @@ class SocketServer:
 
             try:
                 claimed_addr = str(read_socket(accpeted_socket), "utf-8")
+                logger.info(f"IP {claimed_addr} connected")
             except TimeoutError:
                 raise SocketException("Did not receive address claim after connection from %s" % addr)
 
@@ -148,12 +156,13 @@ class SocketServer:
             self.other_send_sockets[peer_name] = my_socket
             self.traffic_counter_to[peer_name] = 0
             self.send_locks[peer_name] = threading.Lock()
+            logger.info(f"Connected to {peer_addr}({peer_name})")
 
         peers = [(peer_addr, self.other_addrs[peer_addr]) for peer_addr in self.other_addrs]
         for peer in peers:
             connect_one(*peer)
-        # while self.listening:
-        #     time.sleep(0.1)
+        while self.waiting_for_connection:
+            time.sleep(0.1)
         return
 
     def send_to(self, name: str, data: bytes):

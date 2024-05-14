@@ -47,8 +47,6 @@ class Communication:
     def fetch(self, to_role: str, from_role: str, header: str):
         raise NotImplementedError()
 
-    def generate_report(self, latency: float, bandwidth: float):
-        raise NotImplementedError()
 
 
 
@@ -60,6 +58,7 @@ class SimulatedCommunication(Communication):
         self.communication_buffer = dict()
         self.current_stage = -1
         self.stage_names = []
+        self.new_stage("Default")
 
     def new_stage(self, name: str):
         self.current_stage += 1

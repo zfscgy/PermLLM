@@ -22,8 +22,11 @@ class GLMPositionalEmbedding(nn.Module):
         super(GLMPositionalEmbedding, self).__init__()
         self.inv_freq = nn.Parameter(1. / (10000 ** (torch.arange(0, dim, 2).float() / dim)), requires_grad=False)
         # [dim]
+        sins, coss = self.generate_rotary_embedding(512)
+        self.sin_embs = nn.Parameter(sins, requires_grad=False)
+        self.cos_embs = nn.Parameter(coss, requires_grad=False)
 
-    def get_rotary_embedding(self, seq_len: int):
+    def generate_rotary_embedding(self, seq_len: int):
         v = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)[:, None] @ self.inv_freq[None, :]
         v = torch.cat([v, v], dim=-1)
         return torch.cos(v), torch.sin(v)  # [seq_len, dim / 2], [seq_len, dim / 2]
@@ -33,7 +36,11 @@ class GLMPositionalEmbedding(nn.Module):
         qs, ks: [seq_len, batch, n_heads, head_dim]
         position_ids: [batch, 2, seq_len]
         """
-        cos_emb, sin_emb = self.get_rotary_embedding(torch.max(position_ids) + 1)  # [seq_len, dim/2]
+        current_rotary_embedding_size = self.sin_embs.shape[0]
+        max_len = torch.max(position_ids) + 1
+        if max_len > current_rotary_embedding_size:
+            self.sin_embs.data, self.cos_embs.data = self.generate_rotary_embedding(max_len * 2)
+
         qs1, qs2 = qs.chunk(2, dim=-1)
         ks1, ks2 = ks.chunk(2, dim=-1)
         position_ids_1 = position_ids[:, 0, :].T  # [seq_len, batch]
@@ -44,8 +51,8 @@ class GLMPositionalEmbedding(nn.Module):
             xs: [seq_len, batch, n_heads, head_dim/2]
             position_ids: [seq_len, batch]
             """
-            cos_embs = F.embedding(position_ids, cos_emb)  # [seq_len, batch, head_dim/2]
-            sin_embs = F.embedding(position_ids, sin_emb)
+            cos_embs = F.embedding(position_ids, self.cos_embs)  # [seq_len, batch, head_dim/2]
+            sin_embs = F.embedding(position_ids, self.sin_embs)
             xs = (xs * cos_embs[:, :, None, :]) + (rotate_half(xs) * sin_embs[:, :, None, :])
             return xs
         
