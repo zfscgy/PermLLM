@@ -111,51 +111,68 @@ def test_whole(length: int = 1):
 
     comm.new_stage("offline")
 
-    print("Start offline execute...")
-    for length in [5] + [1] * 20:
-        start_time = time.time()
-        protocol.offline_execute(length)
-        print(f"Offline execution stopped in {time.time() - start_time:.3}s.")
+    for query in [
+        "Tell me about Trump", 
+        "Can you tell me how many stars are there in the sky?", 
+        "今天去医院看病开药，花了270多，结果260多是中成药，关键是我觉得中成药基本上没大用处，是不是开药的时候明确说不要中成药",
+        "The day before Elon Musk fired virtually all of Tesla’s electric-vehicle charging division last month,\
+            they had high hopes as charging chief Rebecca Tinucci went to meet with Musk about the network’s future,\
+            four former charging-network staffers told Reuters. What is the charging-network?"
+        ]:
 
-    # input("Press any key to start online...")
-    # TC command can be used here to measure the 
+        input_len = len(glm.get_tokenization(query)[0][0])
+        print(f"Input length: {input_len}")
+        input("Press to start private inference")
 
-    comm.simulate_network(5, 200)
-    print("Start online execute (real test, wait for 3 seconds)...")
-    if node_id == 1:
-        query = "Tell me about Trump"  # After tokenization, the length shall be 6
-        input_ids, _, _ = glm.get_tokenization(query)
-        input_ids = input_ids[0]
-        input_selector = torch.zeros(len(input_ids), glm.n_tokens).to(device)
-        for i in range(len(input_ids)):
-            input_selector[i, input_ids[i]] = 1
+        comm.unset_simulation()
+        print("Start offline execute...")
+        for length in [input_len - 1] + [1] * 20:
+            start_time = time.time()
+            protocol.offline_execute(length)
+            print(f"Offline execution stopped in {time.time() - start_time:.3}s.")
+
+        # input("Press any key to start online...")
+        # TC command can be used here to measure the 
+
+        comm.simulate_network(10, 100)
+        print("Start online execute ")
+        if node_id == 1:
+            input_ids, _, _ = glm.get_tokenization(query)
+            input_ids = input_ids[0]
+            input_selector = torch.zeros(len(input_ids), glm.n_tokens).to(device)
+            for i in range(len(input_ids)):
+                input_selector[i, input_ids[i]] = 1
+            
+            input_tensor = input_selector[:-1]
         
-        input_tensor = input_selector[:-1]
-    
-    for i in range(21):
-        if node_id == 1:
-            node.storage[f"{protocol.name}:x"] = input_tensor
+        
+        for i in range(21):
+            if node_id == 1:
+                node.storage[f"{protocol.name}:x"] = input_tensor
 
-        comm.new_stage(f"online-{i}")
-        start_time = time.time()
-        protocol.online_execute()
-        print(f"Online execution stopped in {time.time() - start_time:.3}s.")
+            comm.new_stage(f"online-{i}")
+            start_time = time.time()
+            protocol.online_execute()
+            online_time = time.time() - start_time
+            
 
-        print("-------------Output --------------")
+            history0 = comm.comm_history[comm.stage_names[-1]]
+            online_mbytes = sum([h['size'] for h in history0]) / (1024**2)
 
-        history0 = comm.comm_history[comm.stage_names[-1]]
-        print(f"Total rounds: {len(history0)}")
-        total_bytes = sum([h['size'] for h in history0])
-        print(f"Total Mbs: {total_bytes / (1024**2):.2f}Mb")
-
-        if node_id == 1:
-            next_id = node.storage[f"{protocol.name}:z"].item()
-            print("Predicted token: ", glm.decode(next_id))
-            if i == 0:
-                input_tensor = input_selector[-1:]
+            if node_id == 1:
+                next_id = node.storage[f"{protocol.name}:z"].item()
+                predicted_token = glm.decode(next_id)
+                print(f"{online_time:.2f}\t{online_mbytes:.2f}\t{predicted_token}")
+                if i == 0:
+                    input_tensor = input_selector[-1:]
+                else:
+                    input_tensor = torch.zeros([1, glm.n_tokens]).to(device)
+                    input_tensor[0, next_id] = 1
             else:
-                input_tensor = torch.zeros([1, glm.n_tokens]).to(device)
-                input_tensor[0, next_id] = 1
+                print(f"Online execution stopped in {online_time:.3}s.")
+
+
+        protocol.reset()
 
 
 if __name__ == "__main__":
