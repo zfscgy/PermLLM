@@ -89,9 +89,9 @@ def test_layer():
     n0.storage[f"{protocol_name}:x0"] = x0
     n1.storage[f"{protocol_name}:x1"] = x1
 
-    protocol0 = GLM_TransformerLayerProtocol(n0, Node.from_remote_name("n1"), Node.from_remote_name("n2"), 0, 10, private_mlp=False, name=protocol_name, device=device)
-    protocol1 = GLM_TransformerLayerProtocol(Node.from_remote_name("n0"), n1, Node.from_remote_name("n2"), 0, 10, private_mlp=False, name=protocol_name, device=device)
-    protocol2 = GLM_TransformerLayerProtocol(Node.from_remote_name("n0"), Node.from_remote_name("n1"), n2, 0, 10, private_mlp=False, name=protocol_name, device=device)
+    protocol0 = GLM_TransformerLayerProtocol(n0, Node.from_remote_name("n1"), Node.from_remote_name("n2"), 0, 10, name=protocol_name, device=device)
+    protocol1 = GLM_TransformerLayerProtocol(Node.from_remote_name("n0"), n1, Node.from_remote_name("n2"), 0, 10, name=protocol_name, device=device)
+    protocol2 = GLM_TransformerLayerProtocol(Node.from_remote_name("n0"), Node.from_remote_name("n1"), n2, 0, 10, name=protocol_name, device=device)
 
     print("Start prepare...")
 

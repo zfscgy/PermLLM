@@ -50,21 +50,19 @@ def test_whole(length: int = 1):
         attentions.append(attn_wrapped.to(device))
 
         ff_wrapped = FeedForward_GLM_Wrapped(4096, 32, i)
-        if node_id != 0:
-            ff_wrapped.mlp_dense_in = None
-            ff_wrapped.mlp_dense_out = None
         if i == 27:
             copy_feedforward(transformer_layer, None, ff_wrapped)
             ff_wrapped.layernorm_out = glm.condgen.transformer.final_layernorm.float()
         else:
             copy_feedforward(transformer_layer, raw_glm_layers[i + 1].float(), ff_wrapped)
+        
+        if node_id != 0:
+            ff_wrapped.mlp_dense_in = None
+            ff_wrapped.mlp_dense_out = None
         ff_wrapped.requires_grad_(False)
         ffs.append(ff_wrapped.to(device))
     
-    input_layernorm = raw_glm_layers[0].input_layernorm.float().to(device)
 
-    if node_id == 0:
-        word_embedding = glm.condgen.transformer.word_embeddings.weight.float().to(device)
 
     print(f"Current node: {node_id}")
 
@@ -80,37 +78,32 @@ def test_whole(length: int = 1):
     
     time.sleep(10) # Wait the server to start listening
     sock.connect_all()
+   
+    input("Model load successfully, press any key to start network connection...")
+
     print("Socket connected")
 
     comm = RealCommunication({f"n{node_id}": sock}, tensor_device=device)
     node = Node(comm, f"n{node_id}")
+    node.space.attentions = attentions
+    node.space.ffs = ffs
 
-    # Delete sensitive weights
-    
+    input_layernorm = raw_glm_layers[0].input_layernorm.float().to(device)
+    node.space.input_layernorm = input_layernorm
 
-    if node_id != 0:
-        attn_wrapped.qkv_weight = None
-        attn_wrapped.qkv_bias = None
-        attn_wrapped.attn_out_weight = None
-        attn_wrapped.attn_out_bias = None
-    else:
+    if node_id == 0:
+        word_embedding = glm.condgen.transformer.word_embeddings.weight.float().to(device)
         node.space.word_embedding = word_embedding
-    
-    node.space.attentions = [attn_wrapped]
 
-    if node_id != 2:
-        node.space.ffs = [ff_wrapped]
-        node.space.input_layernorm = input_layernorm
 
 
     all_nodes = [Node.from_remote_name("n0"), Node.from_remote_name("n1"), Node.from_remote_name("n2")]
     all_nodes[node_id] = node
     protocol = GLM_Protocol(*all_nodes, generate_scale_dict(100), device=device)
-    
-    input("Model load successfully, press any key to start prepare...")
+ 
 
     comm.new_stage("Prepare")
-
+    print("Start prepare...")
     start_time = time.time()
     protocol.prepare()
     print(f"Prepare stopped in {time.time() - start_time:.3}s.")
@@ -159,7 +152,7 @@ def test_whole(length: int = 1):
         if node_id == 1:
             print("Predicted token: ", glm.decode(node.storage[f"{protocol.name}:z"]))
             if i == 0:
-                input_tensor = input_selector[:-1]
+                input_tensor = input_selector[-1:]
             else:
                 input_tensor = torch.zeros([1, glm.n_tokens])
                 input_tensor[0, node.storage[f"{protocol.name}:z"]] = 1
@@ -168,3 +161,15 @@ def test_whole(length: int = 1):
 
 if __name__ == "__main__":
     test_whole()
+
+
+"""
+To test this file:
+First, open 3 terminals and add PYTHONPATH
+    export PYTHONPATH=/root/autodl-tmp/PermLLM
+
+Second, execute them one by one:
+    python secure_inference_test__multiparty_whole_processing.py 0
+    python secure_inference_test__multiparty_whole_processing.py 1
+    python secure_inference_test__multiparty_whole_processing.py 2
+"""

@@ -19,9 +19,11 @@ try:
 except:
     node_id = 0
 
-def test_layer(length: int = 1):
-    device = "cuda:1"
+device = "cuda:0"
 
+
+
+def test_layer(length: int = 1):
     # Initialize transformer layers
 
     attn_wrapped = Attention_GLM_Wrapped(4096, 32, 0).to(device)
@@ -75,7 +77,7 @@ def test_layer(length: int = 1):
     all_nodes = [Node.from_remote_name("n0"), Node.from_remote_name("n1"), Node.from_remote_name("n2")]
     all_nodes[node_id] = node
 
-    protocol = GLM_TransformerLayerProtocol(*all_nodes, 0, 10, private_mlp=False, name=protocol_name, device=device)
+    protocol = GLM_TransformerLayerProtocol(*all_nodes, 0, 10, name=protocol_name, device=device)
 
     print("Start prepare...")
 
@@ -108,6 +110,8 @@ def test_layer(length: int = 1):
     if node_id == 0:
         time.sleep(3)  # This is to wait for the other node to finish the offline phase. (Otherwise the total time could be larger)
     
+    comm.simulate_network(10, 100)
+
     for i in range(4):
         comm.new_stage("online")
         start_time = time.time()
@@ -124,3 +128,14 @@ def test_layer(length: int = 1):
 
 if __name__ == "__main__":
     test_layer()
+
+"""
+To test this file:
+First, open 3 terminals and add PYTHONPATH
+    export PYTHONPATH=/root/autodl-tmp/PermLLM
+
+Second, execute them one by one:
+    python secure_inference_test__multiparty_layer_processing.py 0
+    python secure_inference_test__multiparty_layer_processing.py 1
+    python secure_inference_test__multiparty_layer_processing.py 2
+"""
