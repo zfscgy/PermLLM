@@ -35,8 +35,16 @@ def generate_scale_dict(scale_factor: float):
             prefix + "/layernorm_in/x": 10 * scale_factor,
             prefix + "/layernorm_in/z": scale_factor,
 
+            prefix + "/mlp_in/u": 0.02 * scale_factor,
+            prefix + "/mlp_in/v": 1 * scale_factor,
+            prefix + "/mlp_in/w": 1.5 * scale_factor,
+
             prefix + "/gelu/x": 1.5 * scale_factor,
             prefix + "/gelu/z": 1.5 * scale_factor,
+
+            prefix + "/mlp_out/u": 0.02 * scale_factor,
+            prefix + "/mlp_out/v": 1.5 * scale_factor,
+            prefix + "/mlp_out/w": 2 * scale_factor,
 
             prefix + "/layernorm_out/x": 10 * scale_factor,
             prefix + "/layernorm_out/z": scale_factor
