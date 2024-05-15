@@ -22,7 +22,7 @@ class GLMPositionalEmbedding(nn.Module):
         super(GLMPositionalEmbedding, self).__init__()
         self.inv_freq = nn.Parameter(1. / (10000 ** (torch.arange(0, dim, 2).float() / dim)), requires_grad=False)
         # [dim]
-        sins, coss = self.generate_rotary_embedding(512)
+        coss, sins = self.generate_rotary_embedding(64)
         self.sin_embs = nn.Parameter(sins, requires_grad=False)
         self.cos_embs = nn.Parameter(coss, requires_grad=False)
 
@@ -39,7 +39,7 @@ class GLMPositionalEmbedding(nn.Module):
         current_rotary_embedding_size = self.sin_embs.shape[0]
         max_len = torch.max(position_ids) + 1
         if max_len > current_rotary_embedding_size:
-            self.sin_embs.data, self.cos_embs.data = self.generate_rotary_embedding(max_len * 2)
+            self.cos_embs.data, self.sin_embs.data = self.generate_rotary_embedding(max_len * 2)
 
         qs1, qs2 = qs.chunk(2, dim=-1)
         ks1, ks2 = ks.chunk(2, dim=-1)

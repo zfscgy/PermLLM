@@ -31,7 +31,7 @@ except:
     node_id = 0
 
 def test_whole(length: int = 1):
-    device = ["cuda:0", "cuda:0", "cuda:0"][node_id]
+    device = ["cuda:0", "cuda:1", "cuda:2"][node_id]
 
     # Initialize transformer layers
     raw_glm_layers: List[GLMBlock] = glm.condgen.transformer.layers
@@ -120,43 +120,42 @@ def test_whole(length: int = 1):
     # input("Press any key to start online...")
     # TC command can be used here to measure the 
 
-    
+    comm.simulate_network(5, 200)
     print("Start online execute (real test, wait for 3 seconds)...")
     if node_id == 1:
         query = "Tell me about Trump"  # After tokenization, the length shall be 6
         input_ids, _, _ = glm.get_tokenization(query)
         input_ids = input_ids[0]
-        input_selector = torch.zeros(len(input_ids), glm.n_tokens)
+        input_selector = torch.zeros(len(input_ids), glm.n_tokens).to(device)
         for i in range(len(input_ids)):
             input_selector[i, input_ids[i]] = 1
-
+        
+        input_tensor = input_selector[:-1]
+    
     for i in range(21):
-
         if node_id == 1:
-            print("Predicted token: ", glm.decode(node.storage[f"{protocol.name}:z"]))
-            if i == 0:
-                input_tensor = input_selector[:-1]
             node.storage[f"{protocol.name}:x"] = input_tensor
-        comm.new_stage("online")
+
+        comm.new_stage(f"online-{i}")
         start_time = time.time()
         protocol.online_execute()
         print(f"Online execution stopped in {time.time() - start_time:.3}s.")
 
         print("-------------Output --------------")
 
-        history0 = comm.comm_history['online']
+        history0 = comm.comm_history[comm.stage_names[-1]]
         print(f"Total rounds: {len(history0)}")
         total_bytes = sum([h['size'] for h in history0])
         print(f"Total Mbs: {total_bytes / (1024**2):.2f}Mb")
 
         if node_id == 1:
-            print("Predicted token: ", glm.decode(node.storage[f"{protocol.name}:z"]))
+            next_id = node.storage[f"{protocol.name}:z"].item()
+            print("Predicted token: ", glm.decode(next_id))
             if i == 0:
                 input_tensor = input_selector[-1:]
             else:
-                input_tensor = torch.zeros([1, glm.n_tokens])
-                input_tensor[0, node.storage[f"{protocol.name}:z"]] = 1
-
+                input_tensor = torch.zeros([1, glm.n_tokens]).to(device)
+                input_tensor[0, next_id] = 1
 
 
 if __name__ == "__main__":

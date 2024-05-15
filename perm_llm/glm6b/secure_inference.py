@@ -670,7 +670,9 @@ class GLM_FeedForwardProtocol(Protocol):
 
     def reset(self):
         self.layernorm_in_protocol.reset()
+        self.mlp_in_protocol.reset()
         self.gelu_protocol.reset()
+        self.mlp_out_protocol.reset()
         self.layernorm_out_protocol.reset()
 
 

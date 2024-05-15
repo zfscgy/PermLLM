@@ -18,12 +18,12 @@ def estimate_size(m):
             raise ValueError("Unsupported NumPy type for size estimation")
     elif isinstance(m, torch.Tensor):
         if m.dtype == torch.float:
-            return np.prod(m.shape) * 4
+            return int(np.prod(m.shape) * 4)
         elif m.dtype == torch.half:
-            return np.prod(m.shape) * 2
+            return int(np.prod(m.shape) * 2)
         elif m.dtype in [torch.int, torch.long]:
             bit_length = torch.ceil(torch.log2(torch.max(m) - torch.min(m))).item()
-            return np.prod(m.shape) * bit_length / 4
+            return int(np.prod(m.shape) * bit_length / 4)
         else:
             raise ValueError("Unsupported Torch type for size estimation")
     elif isinstance(m, list) or isinstance(m, tuple):
