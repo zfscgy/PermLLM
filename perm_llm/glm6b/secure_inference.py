@@ -86,7 +86,7 @@ class GLM_AttentionProtocol(Protocol):
         self.next_lengths = []
 
         self.position_ids = []
-        self.positional_embedding = GLMPositionalEmbedding(64).to(device)
+        self.positional_embedding = GLMPositionalEmbedding(GLMConfig.head_dim // 2).to(device)
 
         self.device = device
 
@@ -754,51 +754,32 @@ class GLM_TransformerLayerProtocol(Protocol):
         self.ff_protocol.reset()
 
 
-class GLM_PredictionProtocol(Protocol):
-    mask_scale_keys = ["final_dense/v", "final_dense/w", "score_permutation"]
 
-    def __init__(self, n0: Node, n1: Node, n2: Node, embedding_name: str, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
+
+class GLM_SelectionProtocol(Protocol):
+    mask_scale_keys = ["permutation"]
+    def __init__(self, n0: Node, n1: Node, n2: Node, f_select: Callable, mask_scale: float, name: str = None, device: str = "cpu"):
+        """
+        f_select take a list as input
+        """
+        
         self.n0 = n0
         self.n1 = n1
         self.n2 = n2
 
+        self.f_select = f_select
+        self.device = device
+        self.name = name or "selection"
+        
         if not isinstance(mask_scale, dict):
             mask_scale = {k: mask_scale for k in self.mask_scale_keys}
-        self.mask_scale = mask_scale
-
-        self.device = device
-
-        self.name = name or f"GLM__PredictionLayer"
-
         
-        self.embedding_name = embedding_name  # x (embedding.weight/lm_head.weight) is shared
-        self.prediction_dense_name = f"{self.name}/final_dense"
-        self.randperm_name = f"{self.name}/score_permutation"
-
-        self.prediction_dense_protocol = SS_Mul__CX_N0(
-            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x.T), self.prediction_dense_name,
-            n0, n1, n2, get_sub_dict(mask_scale, "final_dense/"), device
-        )
+        self.randperm_name = f"{self.name}/permutation"
         self.randperm_protocol = SS_Perm(
-            (lambda x, i: x[i]), self.randperm_name, n0, n1, n2, mask_scale["score_permutation"], device
+            (lambda x, i: x[i]), self.randperm_name, n0, n1, n2, mask_scale["permutation"], device
         )
 
     def prepare(self):
-
-        # prediction_dense protocols's x is the same as the embedding_retrieval protocol
-        # So just copying the weight (reference) instead of allocating new storage
-        # Also the beaver triples are shared!
-
-
-        if self.n0.local():
-            self.n0.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:x"] = self.n0.storage[f"{self.embedding_name}/onehot_matmul:x"]
-
-        if self.n1.local():
-            self.n1.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:x-u"] =  self.n1.storage[f"{self.embedding_name}/onehot_matmul:x-u"] 
- 
-        if self.n2.local():
-            self.n2.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:beaver_u"] = self.n2.storage[f"{self.embedding_name}/onehot_matmul:beaver_u"] 
-
         self.randperm_protocol.prepare()
 
         # In node_1
@@ -811,52 +792,35 @@ class GLM_PredictionProtocol(Protocol):
             self.n0.storage['bfv_cryptosystem'] = BFV.from_bytes(*self.n0.fetch(self.n1.name, f"{self.name}:bfv_keys"))
 
     def offline_execute(self):
-        self.prediction_dense_protocol.offline_execute([GLMConfig.model_dim], [GLMConfig.n_tokens])
-        
         if self.n0.local():
             perm_key = torch.randperm(GLMConfig.n_tokens, device=self.device)
             self.n0.storage[f"{self.randperm_name}:new_perm"] = perm_key
         self.randperm_protocol.offline_execute([GLMConfig.n_tokens])
-    
-    def online_execute(self):
-        """
-        Input:
-            Node 0: y0
-            Node 1: y1
-        """
-        if self.n0.local():
-            self.n0.storage[f"{self.prediction_dense_name}:y0"] = self.n0.storage[f"{self.name}:x0"]
-        
-        if self.n1.local():
-            self.n1.storage[f"{self.prediction_dense_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
-        
-        self.prediction_dense_protocol.online_execute()
 
+    def online_execute(self):
         if self.n0.local():
             self.n0.storage[f"{self.name}:current_permutation"] = self.n0.storage[f"{self.randperm_name}:perm"][-1].tolist()
-            self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:z0"]  # The final prediction layer has no bias
+            self.n0.storage[f"{self.randperm_name}:x0"] = self.n0.storage[f"{self.name}:x0"]  # The final prediction layer has no bias
         
         if self.n1.local():
-            self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:z1"]
-        
+            self.n1.storage[f"{self.randperm_name}:x1"] = self.n1.storage[f"{self.name}:x1"]
         self.randperm_protocol.online_execute()
-
+        
         if self.n0.local():
             self.n0.send(self.n1.name, f"{self.randperm_name}:permuted_s0", self.n0.storage[f"{self.randperm_name}:z0"])
-
         # In node_1
         if self.n1.local():
-            permuted_scores = self.n1.storage[f"{self.randperm_name}:z1"] + \
+            permuted_vals = self.n1.storage[f"{self.randperm_name}:z1"] + \
                 self.n1.fetch(self.n0.name, f"{self.randperm_name}:permuted_s0")
 
             # Using the greedy generation
-            best_idx = np.argmax(permuted_scores.tolist())
+            best_idx = self.f_select(permuted_vals.tolist())
             indicator = np.zeros([GLMConfig.n_tokens], dtype=int)
             indicator[best_idx] = 1
             indicator_cts = []
             indicator_cts = self.n1.storage['bfv_cryptosystem'].encrypt_vector(indicator)
             self.n1.send(self.n0.name, f"{self.name}:index_indicator_ct", [self.n1.storage['bfv_cryptosystem'].serialize_ciphertext(c) for c in indicator_cts])
-            del permuted_scores, best_idx, indicator, indicator_cts
+            del permuted_vals, best_idx, indicator, indicator_cts
 
         # In node_0
         if self.n0.local():
@@ -877,9 +841,98 @@ class GLM_PredictionProtocol(Protocol):
             self.n1.storage[f"{self.name}:z"] = index
 
             del index_ct, index
-    
-        self.prediction_dense_protocol.clear_io()
+        
         self.randperm_protocol.clear_io()
+    
+    def clear_io(self):
+        if self.n0.local():
+            del self.n0.storage[f"{self.name}:x0"]
+        
+        if self.n1.local():
+            del self.n1.storage[f"{self.name}:x1"], self.n1.storage[f"{self.name}:z"]
+
+    def reset(self):
+        self.randperm_protocol.reset()
+
+
+class GLM_PredictionProtocol(Protocol):
+    mask_scale_keys = ["final_dense/v", "final_dense/w", "selection/permutation"]
+
+    def __init__(self, n0: Node, n1: Node, n2: Node, embedding_name: str, mask_scale: Union[float, Dict[str, float]], name: str = None, device: str = "cpu"):
+        self.n0 = n0
+        self.n1 = n1
+        self.n2 = n2
+
+        if not isinstance(mask_scale, dict):
+            mask_scale = {k: mask_scale for k in self.mask_scale_keys}
+        self.mask_scale = mask_scale
+
+        self.device = device
+
+        self.name = name or f"GLM__PredictionLayer"
+
+        
+        self.embedding_name = embedding_name  # x (embedding.weight/lm_head.weight) is shared
+        self.prediction_dense_name = f"{self.name}/final_dense"
+        self.selection_name = f"{self.name}/selection"
+
+        self.prediction_dense_protocol = SS_Mul__CX_N0(
+            [GLMConfig.n_tokens, GLMConfig.model_dim], (lambda x, y: y @ x.T), self.prediction_dense_name,
+            n0, n1, n2, get_sub_dict(mask_scale, "final_dense/"), device
+        )
+
+        self.selection_protocol = GLM_SelectionProtocol(
+            n0, n1, n2, np.argmax, get_sub_dict(mask_scale, "selection/"),
+            self.selection_name, device
+        )
+
+
+    def prepare(self):
+
+        # prediction_dense protocols's x is the same as the embedding_retrieval protocol
+        # So just copying the weight (reference) instead of allocating new storage
+        # Also the beaver triples are shared!
+        if self.n0.local():
+            self.n0.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:x"] = self.n0.storage[f"{self.embedding_name}/onehot_matmul:x"]
+
+        if self.n1.local():
+            self.n1.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:x-u"] =  self.n1.storage[f"{self.embedding_name}/onehot_matmul:x-u"] 
+ 
+        if self.n2.local():
+            self.n2.storage[f"{self.prediction_dense_name}/SS_Mul__CX_N0_Y_N1:beaver_u"] = self.n2.storage[f"{self.embedding_name}/onehot_matmul:beaver_u"] 
+
+        self.selection_protocol.prepare()
+
+
+    def offline_execute(self):
+        self.prediction_dense_protocol.offline_execute([GLMConfig.model_dim], [GLMConfig.n_tokens])
+        self.selection_protocol.offline_execute()
+
+    def online_execute(self):
+        """
+        Input:
+            Node 0: y0
+            Node 1: y1
+        """
+        if self.n0.local():
+            self.n0.storage[f"{self.prediction_dense_name}:y0"] = self.n0.storage[f"{self.name}:x0"]        
+        if self.n1.local():
+            self.n1.storage[f"{self.prediction_dense_name}:y1"] = self.n1.storage[f"{self.name}:x1"]
+        
+        self.prediction_dense_protocol.online_execute()
+
+        if self.n0.local():
+            self.n0.storage[f"{self.selection_name}:x0"] = self.n0.storage[f"{self.prediction_dense_name}:z0"]
+        if self.n1.local():
+            self.n1.storage[f"{self.selection_name}:x1"] = self.n1.storage[f"{self.prediction_dense_name}:z1"]
+
+        self.selection_protocol.online_execute()
+
+        if self.n1.local():
+            self.n1.storage[f"{self.name}:z"] = self.n1.storage[f"{self.selection_name}:z"]
+
+        self.prediction_dense_protocol.clear_io()
+        self.selection_protocol.clear_io()
 
 
     def clear_io(self):
@@ -891,7 +944,8 @@ class GLM_PredictionProtocol(Protocol):
     
     def reset(self):
         self.prediction_dense_protocol.reset()
-        self.randperm_protocol.reset()
+        self.selection_protocol.reset()
+
 
 
 class GLM_EmbeddingRetrievalProtocol(Protocol):
@@ -928,7 +982,7 @@ class GLM_EmbeddingRetrievalProtocol(Protocol):
 
     def prepare(self):
         if self.n0.local():
-            embedding: nn.Linear = self.n0.space.word_embedding
+            embedding: torch.Tensor = self.n0.space.word_embedding
             self.n0.storage[f"{self.onehot_matmul_name}:x"] = embedding
         self.onehot_matmul_protocol.prepare()
         self.layernorm_in_protocol.prepare()

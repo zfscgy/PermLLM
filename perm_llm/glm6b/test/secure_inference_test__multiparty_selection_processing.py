@@ -2,16 +2,14 @@ import copy
 import threading
 import time
 
+import numpy as np
 import torch
 
 from simple_socket.zf_socket import SocketServer
 from perm_llm.common.communication import Node
 from perm_llm.common.real_communication import RealCommunication
 from perm_llm.common.utils import test_func
-from perm_llm.common.torch_utils import relative_error
-from perm_llm.glm6b.wrapped_layer import Attention_GLM_Wrapped, FeedForward_GLM_Wrapped
-from perm_llm.glm6b.utils import generate_position_ids
-from perm_llm.glm6b.secure_inference import GLMConfig, GLM_TransformerLayerProtocol
+from perm_llm.glm6b.secure_inference import GLMConfig, GLM_SelectionProtocol
 
 import sys
 try:
@@ -22,22 +20,12 @@ except:
 device = "cuda:0"
 
 
-GLMConfig.model_dim = 768
-GLMConfig.head_dim = 64
-GLMConfig.n_heads = 12
+GLMConfig.n_tokens = 100_000
 
 
 
-def test_layer(length: int = 1):
-    # Initialize transformer layers
-
-    attn_wrapped = Attention_GLM_Wrapped(GLMConfig.model_dim, GLMConfig.n_heads, 0).to(device)
-    attn_wrapped.requires_grad_(False)
-    ff_wrapped = FeedForward_GLM_Wrapped(GLMConfig.model_dim, GLMConfig.n_heads, 0).to(device)
-    ff_wrapped.requires_grad_(False)
-    
+def test_selection(length: int = 1):
     print(f"Current node: {node_id}")
-
     # Set up communication
     address_dict = {
         "127.0.0.1:6000": "n0",
@@ -56,33 +44,18 @@ def test_layer(length: int = 1):
     node = Node(comm, f"n{node_id}")
 
     # Delete sensitive weights
-    
-
-    if node_id != 0:
-        attn_wrapped.qkv_weight = None
-        attn_wrapped.qkv_bias = None
-        attn_wrapped.attn_out_weight = None
-        attn_wrapped.attn_out_bias = None
-        node.space.attentions = [attn_wrapped]
-    else:
-        node.space.attentions = [attn_wrapped]
-
-    if node_id != 2:
-        node.space.ffs = [ff_wrapped]
-
-
     protocol_name = "transformer_layer"
 
-    if node_id == 0:
-        x0 = torch.normal(0, 1, [1, 1, GLMConfig.model_dim]).to(device)
-        node.storage[f"{protocol_name}:x0"] = x0
+    if node_id != 2:
+        x_share = torch.normal(0, 1, [GLMConfig.n_tokens]).to(device)
+        node.storage[f"{protocol_name}:x{node_id}"] = x_share
     if node_id == 1:
-        node.storage[f"{protocol_name}:x1"] = torch.normal(0, 1, [length, 1, GLMConfig.model_dim]).to(device)
+        node.storage[f"{protocol_name}:x1"] = torch.normal(0, 1, [GLMConfig.n_tokens]).to(device)
 
     all_nodes = [Node.from_remote_name("n0"), Node.from_remote_name("n1"), Node.from_remote_name("n2")]
     all_nodes[node_id] = node
 
-    protocol = GLM_TransformerLayerProtocol(*all_nodes, 0, 10, name=protocol_name, device=device)
+    protocol = GLM_SelectionProtocol(*all_nodes, np.argmax, 10, name=protocol_name, device=device)
 
     print("Start prepare...")
 
@@ -98,7 +71,7 @@ def test_layer(length: int = 1):
     print("Start offline execute...")
     for i in range(6):
         start_time = time.time()
-        protocol.offline_execute(length)
+        protocol.offline_execute()
         print(f"Offline execution stopped in {time.time() - start_time:.3}s.")
 
     # input("Press any key to start online...")
@@ -132,7 +105,7 @@ def test_layer(length: int = 1):
 
 
 if __name__ == "__main__":
-    test_layer()
+    test_selection()
 
 """
 To test this file:
@@ -143,7 +116,7 @@ First, open 3 terminals and add PYTHONPATH
 
 
 Second, execute them one by one:
-    python secure_inference_test__multiparty_layer_processing.py 0
-    python secure_inference_test__multiparty_layer_processing.py 1
-    python secure_inference_test__multiparty_layer_processing.py 2
+    python secure_inference_test__multiparty_selection_processing.py 0
+    python secure_inference_test__multiparty_selection_processing.py 1
+    python secure_inference_test__multiparty_selection_processing.py 2
 """
